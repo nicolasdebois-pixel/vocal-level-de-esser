@@ -1,0 +1,15 @@
+{
+  "name": "Vocal level & de-esser",
+  "category": "Vocal level",
+  "package": "Vocal level & de-esser",
+  "version": "0.1.0",
+  "author": "Nicolas Debois",
+  "description": "Nivelle une voix parlée ou chantée et atténue ses sifflantes, en écrivant des courbes d'automation sur la prise. Analyse de tout l'item à l'avance : aucune latence, aucun pompage.",
+  "files": [
+    {"path": "Scripts/Vocal level & de-esser.lua", "main": true},
+    {"path": "Effects/Vocal level.jsfx", "type": "effect"}
+  ],
+  "changelog": [
+    "Première version : rider (préréglages Parole et Chant) et de-esser par bande d'aigus, courbes écrites sur la prise"
+  ]
+}

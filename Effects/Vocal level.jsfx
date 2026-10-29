@@ -1,0 +1,54 @@
+desc:Vocal level & de-esser (gain automatisé)
+//tags: utility gain de-esser
+//author: Nicolas Debois
+// Plugin piloté par le script « Vocal level & de-esser » : il applique les courbes que le script écrit.
+// Au repos (rider à 0,5 et de-esser à 0), il ne modifie pas le son.
+slider1:rider=0.5<0,1,0.0001>-Rider (0,5 = 0 dB ; 0 = -24 dB ; 1 = +24 dB)
+slider2:deess=0<0,1,0.0001>-De-esser (0 = rien ; 1 = -24 dB)
+slider3:freq=5500<3000,10000,10>Fréquence du de-esser (Hz)
+slider4:split=1<0,1,1{Tout le signal,Aigus seulement}>Mode du de-esser
+
+in_pin:gauche
+in_pin:droite
+out_pin:gauche
+out_pin:droite
+
+@init
+ext_tail_size = 0;
+gr = 1; gd = 1;
+smooth = exp(-1 / (0.002 * srate));      // lissage de 2 ms entre les points de la courbe
+lp1l = lp1r = lp2l = lp2r = 0;
+
+// filtre passe-bas Butterworth du 2e ordre (forme directe transposée II)
+function bq_set(f) instance(b0 b1 b2 a1 a2) local(w c s al a0) (
+  w = 2 * $pi * min(f, srate * 0.45) / srate;
+  c = cos(w); s = sin(w); al = s / (2 * 0.7071067811865476);
+  a0 = 1 + al;
+  b0 = (1 - c) / 2 / a0; b1 = (1 - c) / a0; b2 = b0;
+  a1 = -2 * c / a0; a2 = (1 - al) / a0;
+);
+function bq(x) instance(b0 b1 b2 a1 a2 z1 z2) local(y) (
+  y = b0 * x + z1;
+  z1 = b1 * x - a1 * y + z2;
+  z2 = b2 * x - a2 * y;
+  y;
+);
+
+@slider
+// deux étages en cascade : passe-bas du 4e ordre ; les aigus = signal - passe-bas (reconstruction parfaite)
+fl1.bq_set(freq); fl2.bq_set(freq); fr1.bq_set(freq); fr2.bq_set(freq);
+
+@block
+tr = 10 ^ ((rider * 48 - 24) / 20);
+td = 10 ^ (-24 * deess / 20);
+
+@sample
+gr = tr + (gr - tr) * smooth;
+gd = td + (gd - td) * smooth;
+split ? (
+  lo = fl2.bq(fl1.bq(spl0)); spl0 = (lo + gd * (spl0 - lo)) * gr;
+  lo = fr2.bq(fr1.bq(spl1)); spl1 = (lo + gd * (spl1 - lo)) * gr;
+) : (
+  spl0 *= gd * gr;
+  spl1 *= gd * gr;
+);
