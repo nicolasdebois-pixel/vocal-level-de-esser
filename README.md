@@ -28,6 +28,17 @@ Tout est écrit sous forme de courbes d'automation et d'une égalisation sur un 
    Décochez un traitement pour le couper.
 5. **Retirer** enlève tout des items sélectionnés.
 
+### Retoucher un endroit précis
+Un « B » de « Bonjour » qui souffle encore, un « s » qui siffle toujours, un mot trop faible ?
+1. Gardez l'item sélectionné et faites une **sélection temporelle** sur ce son (glisser dans la règle, ou sur l'item).
+2. Dans **Retouche locale**, cliquez sur le réglage voulu : **Plosive** (−6 à −24 dB de sub), **Sifflante** (−3 à −12 dB d'aigus)
+   ou **Niveau** (−3 à +3 dB).
+3. Seule cette courbe change, et seulement dans la zone : tout le reste du traitement est intact.
+
+Recliquez sur le même réglage pour l'enlever ; **Effacer la zone** supprime les retouches de la zone. Ctrl+Z (Cmd+Z) annule.
+Les retouches sont mémorisées sur la prise : si vous changez ensuite un réglage général, elles sont réappliquées
+par-dessus, et elles suivent le son si vous déplacez ou rognez l'item.
+
 **Réglages avancés** donne accès à tous les curseurs (fréquences, quantités, couleur de l'égalisation…)
 et montre la courbe d'égalisation calculée.
 

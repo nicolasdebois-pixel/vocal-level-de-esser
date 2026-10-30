@@ -709,6 +709,84 @@ local function write_env(env, pts, conv, len)
   show_env(env)
 end
 
+---------------------------------------------------------------- Retouches locales
+-- Une retouche = une zone de la prise + un réglage (plosive, sifflante ou niveau).
+-- Elles sont mémorisées dans la prise (temps de la source audio, donc insensibles au déplacement
+-- ou au rognage de l'item) et réappliquées par-dessus les courbes automatiques à chaque calcul.
+local RET = {
+  plo = { name = "Plosive", steps = { 6, 12, 18, 24 }, mn = 0, mx = 30, fade = 0.010, desc = "coupe le sub (bouffée d'air)" },
+  de  = { name = "Sifflante", steps = { 3, 6, 9, 12 }, mn = 0, mx = 24, fade = 0.010, desc = "adoucit les aigus" },
+  lvl = { name = "Niveau", steps = { -3, -1, 1, 3 }, mn = -24, mx = 24, fade = 0.030, desc = "baisse ou remonte la zone" },
+}
+local RET_ORDER = { "plo", "de", "lvl" }
+local RET_KEY = "P_EXT:VL_RETOUCHES"
+
+local function get_ret(take)
+  local ok, s = reaper.GetSetMediaItemTakeInfo_String(take, RET_KEY, "", false)
+  local list = {}
+  if not ok or type(s) ~= "string" then return list end
+  for k, a, b, d in s:gmatch("(%a+) ([%d%.%-]+) ([%d%.%-]+) ([%d%.%-]+)") do
+    a, b, d = tonumber(a), tonumber(b), tonumber(d)
+    if RET[k] and a and b and d and b > a then list[#list + 1] = { k = k, a = a, b = b, d = d } end
+  end
+  return list
+end
+
+local function set_ret(take, list)
+  local t = {}
+  for _, r in ipairs(list) do t[#t + 1] = string.format("%s %.4f %.4f %.2f", r.k, r.a, r.b, r.d) end
+  reaper.GetSetMediaItemTakeInfo_String(take, RET_KEY, table.concat(t, ";"), true)
+end
+
+-- zone de la sélection temporelle sur cette prise, en temps de la source (nil si elle ne la touche pas)
+local function sel_zone(e)
+  local s, t = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+  if not s or not t or t - s < 0.005 then return nil end
+  local pos = reaper.GetMediaItemInfo_Value(e.item, "D_POSITION")
+  local len = reaper.GetMediaItemInfo_Value(e.item, "D_LENGTH")
+  local a, b = math.max(s, pos) - pos, math.min(t, pos + len) - pos
+  if b - a < 0.005 then return nil end
+  local off = reaper.GetMediaItemTakeInfo_Value(e.take, "D_STARTOFFS")
+  return a + off, b + off
+end
+
+-- ajoute d dB (avec une courte rampe de part et d'autre) à une courbe {t, valeur}, sans toucher au reste
+local function add_zone(pts, a, b, d, f, mn, mx)
+  table.sort(pts, function(p, q) return p[1] < q[1] end)
+  local function val(t)
+    if #pts == 0 then return 0 end
+    if t <= pts[1][1] then return pts[1][2] end
+    for i = 2, #pts do
+      if t <= pts[i][1] then
+        local p, q = pts[i - 1], pts[i]
+        local span = q[1] - p[1]
+        return span > 0 and p[2] + (q[2] - p[2]) * (t - p[1]) / span or q[2]
+      end
+    end
+    return pts[#pts][2]
+  end
+  local function w(t)
+    if t <= a - f or t >= b + f then return 0 end
+    if t < a then return (t - (a - f)) / f end
+    if t > b then return ((b + f) - t) / f end
+    return 1
+  end
+  local out, ts = {}, { a - f, a, b, b + f }
+  for _, p in ipairs(pts) do
+    if p[1] < a - f or p[1] > b + f then out[#out + 1] = p else ts[#ts + 1] = p[1] end
+  end
+  table.sort(ts)
+  local last
+  for _, t in ipairs(ts) do
+    if t ~= last then
+      out[#out + 1] = { math.max(0, t), math.max(mn, math.min(mx, val(t) + d * w(t))) }
+      last = t
+    end
+  end
+  table.sort(out, function(p, q) return p[1] < q[1] end)
+  return out
+end
+
 local function apply_take(e, A)
   local take = e.take
   local fx = find_fx(take)
@@ -735,6 +813,18 @@ local function apply_take(e, A)
   static_cut = math.max(0, static_cut)
   local spts, plos = sub_curve(A, function(i) return static_cut + 0.9 * ((prox_sm and prox_sm[i]) or 0) end)
   for b = 1, 7 do reaper.TakeFX_SetParamNormalized(take, fx, 5 + b, (gains[b] + 12) / 24) end
+  -- retouches locales, par-dessus les courbes automatiques
+  local nret = 0
+  local off = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
+  for _, r in ipairs(get_ret(take)) do
+    local R, a, b = RET[r.k], r.a - off, r.b - off
+    if b > 0 and a < A.len then
+      if r.k == "plo" then spts = add_zone(spts, a, b, r.d, R.fade, R.mn, R.mx)
+      elseif r.k == "de" then dpts = add_zone(dpts, a, b, r.d, R.fade, R.mn, R.mx)
+      else rpts = add_zone(rpts, a, b, r.d, R.fade, R.mn, R.mx) end
+      nret = nret + 1
+    end
+  end
   local er = reaper.TakeFX_GetEnvelope(take, fx, 0, true)
   local ed = reaper.TakeFX_GetEnvelope(take, fx, 1, true)
   local el = reaper.TakeFX_GetEnvelope(take, fx, 4, true)
@@ -752,7 +842,7 @@ local function apply_take(e, A)
     if #spts == 0 then spts = { { 0, 0 } } end
     write_env(es, spts, function(v) return v / 30 end, A.len)
   end
-  return true, { gmin = gmin, gmax = gmax, sib = count, plos = plos, prox = prox, gains = gains, m = m, t = t, want = want }
+  return true, { gmin = gmin, gmax = gmax, sib = count, plos = plos, prox = prox, gains = gains, m = m, t = t, want = want, ret = nret }
 end
 
 local function remove_all(list)
@@ -761,6 +851,7 @@ local function remove_all(list)
   for _, e in ipairs(list) do
     local fx = find_fx(e.take)
     if fx >= 0 then reaper.TakeFX_Delete(e.take, fx); n = n + 1 end
+    if #get_ret(e.take) > 0 then set_ret(e.take, {}) end
   end
   reaper.Undo_EndBlock(TITLE .. " : retrait", -1)
   reaper.UpdateArrange()
@@ -768,7 +859,7 @@ local function remove_all(list)
 end
 
 ---------------------------------------------------------------- Interface
-local AW, AH, SW, SH = 940, 640, 680, 624
+local AW, AH, SW, SH = 940, 750, 680, 720
 local W, H = AW, AH
 if S.adv ~= 1 then W, H = SW, SH end
 gfx.init(TITLE, W, H)
@@ -827,7 +918,7 @@ local function slider(id, label, key, mn, mx, step, fmt, x, y, w, disabled)
 end
 
 local function apply_all()
-  local ok_n, err, gmin, gmax, sib, plos = 0, nil, 0, 0, 0, 0
+  local ok_n, err, gmin, gmax, sib, plos, nret = 0, nil, 0, 0, 0, 0, 0
   UI.eq = nil
   reaper.Undo_BeginBlock()
   reaper.PreventUIRefresh(1)
@@ -837,7 +928,7 @@ local function apply_all()
       local ok, r = apply_take(e, A)
       if ok then
         ok_n = ok_n + 1
-        gmin = math.min(gmin, r.gmin); gmax = math.max(gmax, r.gmax); sib = sib + r.sib; plos = plos + r.plos
+        gmin = math.min(gmin, r.gmin); gmax = math.max(gmax, r.gmax); sib = sib + r.sib; plos = plos + r.plos; nret = nret + (r.ret or 0)
         if not UI.eq and r.m then UI.eq = r end                -- courbe d'égalisation du premier item, pour l'affichage
       else err = r end
     end
@@ -854,6 +945,7 @@ local function apply_all()
     if S.de_on == 1 then parts[#parts + 1] = string.format("%d sifflante%s", sib, sib > 1 and "s" or "") end
     if S.plo_on == 1 then parts[#parts + 1] = string.format("%d plosive%s", plos, plos > 1 and "s" or "") end
     if S.eq_on == 1 then parts[#parts + 1] = "égalisation appliquée" end
+    if nret > 0 then parts[#parts + 1] = string.format("%d retouche%s locale%s", nret, nret > 1 and "s" or "", nret > 1 and "s" or "") end
     UI.stats = #parts > 0 and ("Fait : " .. table.concat(parts, " · ")) or "Tous les traitements sont désactivés."
     set_msg(string.format("%d item%s traité%s. Écoutez, puis ajustez : tout se met à jour à chaque clic.", ok_n, ok_n > 1 and "s" or "", ok_n > 1 and "s" or ""))
   end
@@ -876,6 +968,81 @@ local function start_analysis()
       if qi > #queue then job = nil; UI.progress = nil; apply_all() end
     end
   end
+end
+
+-- Retouche locale : k = type ("plo", "de", "lvl"), d = réglage ; k = nil efface les retouches de la zone.
+-- Recliquer sur le réglage actif l'enlève.
+local function retouch(k, d)
+  takes = selected_takes()
+  local touched = 0
+  for _, e in ipairs(takes) do if sel_zone(e) then touched = touched + 1 end end
+  if touched == 0 then set_msg("Faites d'abord une sélection temporelle sur un item sélectionné."); return end
+  reaper.Undo_BeginBlock()
+  for _, e in ipairs(takes) do
+    local a, b = sel_zone(e)
+    if a then
+      local list, keep, same = get_ret(e.take), {}, false
+      for _, r in ipairs(list) do
+        local overlap = r.a < b and r.b > a
+        if overlap and (k == nil or r.k == k) then
+          if r.k == k and r.d == d then same = true end
+        else keep[#keep + 1] = r end
+      end
+      if k and not same then keep[#keep + 1] = { k = k, a = a, b = b, d = d } end
+      set_ret(e.take, keep)
+    end
+  end
+  local all = true
+  for _, e in ipairs(takes) do if not cache[take_key(e.item, e.take)] then all = false end end
+  if all then apply_all() else start_analysis() end
+  reaper.Undo_EndBlock(TITLE .. " : retouche locale", -1)
+end
+
+-- état de la retouche dans la zone sélectionnée (pour la première prise concernée)
+local function zone_state()
+  for _, e in ipairs(takes) do
+    local a, b = sel_zone(e)
+    if a then
+      local st, n = {}, 0
+      for _, r in ipairs(get_ret(e.take)) do
+        if r.a < b and r.b > a then st[r.k] = r.d; n = n + 1 end
+      end
+      local s, t = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+      return st, n, s, t
+    end
+  end
+end
+
+local function fmt_db(v) return (v > 0 and "+" or (v < 0 and "−" or "")) .. string.format("%g dB", math.abs(v)) end
+
+-- section « Retouche locale » ; renvoie sa hauteur
+local function draw_retouch(x, y, w)
+  col(COL.line); gfx.line(x, y, x + w, y)
+  text("RETOUCHE LOCALE", x, y + 10, COL.muted, 4)
+  local st, n, s, t = zone_state()
+  if not st then
+    text("Sélection temporelle sur le son à retoucher (ex. le « B » de « Bonjour »), puis un réglage ci-dessous.", x, y + 30, COL.muted, 2)
+  else
+    gfx.setfont(4); local hx = x + gfx.measurestr("RETOUCHE LOCALE") + 14
+    text(string.format("zone %.2f → %.2f s (%d ms)%s", s, t, math.floor((t - s) * 1000 + 0.5),
+      n > 0 and string.format(" · %d retouche%s ici", n, n > 1 and "s" or "") or ""), hx, y + 11, COL.accent, 2)
+    if n > 0 and button("Effacer la zone", x + w - 130, y + 6, 130, 22) then retouch(nil) end
+    text("Seule cette zone change : le reste du traitement n'est pas modifié.", x, y + 30, COL.muted, 2)
+  end
+  local ry = y + 52
+  for _, k in ipairs(RET_ORDER) do
+    local R = RET[k]
+    text(R.name, x, ry + 5, st and COL.text or COL.muted, 4)
+    text(R.desc, x + 86, ry + 6, COL.muted, 2)
+    local bw = 66
+    local bx = x + w - 4 * (bw + 4) + 4
+    for i, v in ipairs(R.steps) do
+      local shown = (k == "lvl") and v or -v
+      if button(fmt_db(shown), bx + (i - 1) * (bw + 4), ry, bw, 24, false, st and st[k] == v) and st then retouch(k, v) end
+    end
+    ry = ry + 30
+  end
+  return ry - y + 4
 end
 
 local function eq_graph(x, y, w, h)
@@ -963,10 +1130,12 @@ local function draw_simple()
         chg = true
       end
     end
-    y = y + 64
+    y = y + 60
   end
+  y = y + 6
+  y = y + draw_retouch(x, y, w)
   col(COL.line); gfx.line(x, y, x + w, y)
-  y = y + 14
+  y = y + 10
   if UI.progress then col(COL.line); gfx.rect(x, y, w, 6, 1); col(COL.accent); gfx.rect(x, y, math.floor(w * UI.progress), 6, 1) end
   if UI.stats then text(UI.stats, x, y + 12, COL.ok, 2) end
   text(UI.msg, x, y + 30, COL.muted, 2)
@@ -1062,6 +1231,7 @@ local function draw()
   chg = slider("eq_color", "Couleur (sombre ↔ brillant)", "eq_color", -4, 4, 0.5, function(v) return string.format("%+.1f dB", v) end, x, y, w, off) or chg
   y = y + 40
   eq_graph(x, y, w, 96)
+  draw_retouch(22, 500, W - 44)
 
   -------- bas
   local by = H - 46
