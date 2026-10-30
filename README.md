@@ -5,7 +5,7 @@ L'outil écoute tout l'item, puis corrige :
 
 - **Niveau régulier** : remonte les passages trop faibles, baisse les trop forts (les silences ne sont jamais remontés) ;
 - **Sifflantes** : adoucit les « s », « ch », « z » qui sifflent ;
-- **Plosives et graves** : atténue les « p » et « b » qui soufflent dans le micro, et les graves qui gonflent quand on s'en approche ;
+- **Plosives et graves** : atténue les « p » et « b » qui soufflent dans le micro (bouffées de sub), les graves qui gonflent quand on s'en approche, et coupe l'infra-grave inutile ;
 - **Équilibre de la voix** : corrige une voix trop sourde, trop nasale ou trop brillante, avec une égalisation calculée pour *cette* voix.
 
 Tout est écrit sous forme de courbes d'automation et d'une égalisation sur un petit plugin placé sur la **prise**

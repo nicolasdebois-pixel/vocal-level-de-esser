@@ -14,13 +14,13 @@ local SEP = package.config:sub(1, 1)
 
 ---------------------------------------------------------------- Réglages
 local PRESETS = {
-  parole = { amount = 80, range = 8, smooth = 120 },
-  chant = { amount = 55, range = 6, smooth = 220 },
+  parole = { amount = 80, range = 8, release = 1200 },
+  chant = { amount = 55, range = 6, release = 2000 },
 }
 local DEF = {
-  mode = "parole", auto = 1, target = -20, amount = 80, range = 8, smooth = 120,
+  mode = "parole", auto = 1, target = -20, amount = 80, range = 8, release = 1200,
   de_on = 1, depth = 6, sens = 50, freq = 5500, split = 1,
-  lo_on = 1, lo_depth = 9, plo_sens = 50, prox = 90, lowfreq = 200,
+  lo_on = 1, lo_depth = 9, plo_sens = 50, plo_depth = 20, hpf = 60, prox = 90, lowfreq = 200,
   eq_on = 1, eq_amount = 75, eq_color = 0, eq_max = 6,
   rider_on = 1, adv = 0, lv_rider = 2, lv_de = 2, lv_lo = 2, lv_eq = 2,
 }
@@ -28,7 +28,7 @@ local DEF = {
 local LEVELS = {
   rider = { { amount = 50, range = 5 }, { amount = 80, range = 8 }, { amount = 95, range = 12 } },
   de = { { depth = 4, sens = 40 }, { depth = 6, sens = 50 }, { depth = 9, sens = 65 } },
-  lo = { { lo_depth = 6, plo_sens = 40, prox = 60 }, { lo_depth = 9, plo_sens = 50, prox = 90 }, { lo_depth = 12, plo_sens = 65, prox = 100 } },
+  lo = { { lo_depth = 6, plo_sens = 40, plo_depth = 12, hpf = 50, prox = 60 }, { lo_depth = 9, plo_sens = 50, plo_depth = 20, hpf = 60, prox = 90 }, { lo_depth = 12, plo_sens = 65, plo_depth = 28, hpf = 80, prox = 100 } },
   eq = { { eq_amount = 50, eq_max = 4 }, { eq_amount = 75, eq_max = 6 }, { eq_amount = 100, eq_max = 8 } },
 }
 local S = {}
@@ -152,7 +152,7 @@ local function analyse_take(e, on_progress)
   local k1, k2 = biquad("hp", 70), biquad("hs", 1500, 4, 0.7071)
   local h1, h2 = biquad("hp", S.freq), biquad("hp", S.freq)
   local l1, l2 = biquad("lp", S.lowfreq), biquad("lp", S.lowfreq)
-  local m1, m2 = biquad("lp", 90), biquad("lp", 90)          -- bande des plosives (sous la voix, même grave)
+  local m1, m2 = biquad("lp", 80), biquad("lp", 80)          -- sub : bande des plosives (sous la voix, même grave)
   local lv, fe, he, le, pe = {}, {}, {}, {}, {}      -- énergies par bloc de 20 ms / trames de 4 ms
   local accK, nK, accF, accH, accL, accP, nF = 0, 0, 0, 0, 0, 0, 0
   local ring, rpos, nS, specs = {}, 0, 0, {}
@@ -269,35 +269,94 @@ local function rider_curve(A)
   for i = 1, n do voiced[i] = Lc[i] > gate; if voiced[i] then vl[#vl + 1] = Lc[i] end end
   if #vl == 0 then return { { 0, 0 }, { A.len, 0 } }, 0, 0, nil end
   local T = (S.auto == 1) and pct(vl, 0.5) or S.target
-  local g = {}
+  -- Deux étages, comme un ingénieur qui « ride » : le niveau de la PHRASE (≈ 1,5 s, voix seulement) décide du gain,
+  -- et seules les vraies pointes (plus de 4 dB au-dessus de la phrase) sont rattrapées vite.
+  -- Suivre le niveau syllabe par syllabe ferait pomper.
+  local Ws = math.floor((S.mode == "chant" and 2.5 or 1.5) / 0.02 + 0.5)
+  -- phrases : suites de voix séparées par des pauses d'au moins 0,35 s ; la moyenne ne déborde pas sur la phrase voisine
+  local seg, sid, gapn = {}, 0, 99
   for i = 1, n do
-    if voiced[i] then g[i] = math.max(-S.range, math.min(S.range, (T - Lc[i]) * S.amount / 100)) end
+    if voiced[i] then
+      if gapn >= 18 then sid = sid + 1 end
+      gapn = 0
+    else gapn = gapn + 1 end
+    seg[i] = sid
   end
-  -- silences : on n'y remonte jamais le niveau (le bruit de fond resterait au même niveau)
-  local nextv = {}
-  local nx = nil
-  for i = n, 1, -1 do if g[i] then nx = i end; nextv[i] = nx end
-  local prev = nil
+  local cs, cc = { [0] = 0 }, { [0] = 0 }
   for i = 1, n do
-    if g[i] then prev = i
-    else
-      local nx = nextv[i]
-      local v
-      if prev and nx then v = g[prev] + (g[nx] - g[prev]) * (i - prev) / (nx - prev)
-      else v = (prev and g[prev]) or (nx and g[nx]) or 0 end
-      g[i] = math.min(0, v)
+    cs[i] = cs[i - 1] + (voiced[i] and A.lv[i] or 0)
+    cc[i] = cc[i - 1] + (voiced[i] and 1 or 0)
+  end
+  local sstart, send = {}, {}
+  for i = 1, n do
+    if voiced[i] then
+      local k = seg[i]
+      sstart[k] = sstart[k] or i; send[k] = i
     end
   end
-  -- lissage gaussien symétrique (pas de retard : l'analyse connaît la suite)
-  local sig = math.max(1, S.smooth / 20)
-  local R = math.floor(sig * 3)
-  local ker, ks = {}, 0
-  for k = -R, R do ker[k] = math.exp(-(k * k) / (2 * sig * sig)); ks = ks + ker[k] end
+  local Lp = {}
+  for i = 1, n do
+    local k = seg[i]
+    local a0, b0 = i - Ws // 2, i + Ws // 2
+    if sstart[k] then a0 = math.max(a0, sstart[k]); b0 = math.min(b0, send[k]) end
+    a0 = math.max(1, a0); b0 = math.min(n, math.max(b0, a0))
+    local c = cc[b0] - cc[a0 - 1]
+    Lp[i] = c > 0 and db((cs[b0] - cs[a0 - 1]) / c) or Lc[i]
+  end
+  local g = {}
+  for i = 1, n do
+    if voiced[i] then
+      local slow = (T - Lp[i]) * S.amount / 100
+      local peak = math.max(0, Lc[i] - Lp[i] - 4) * S.amount / 100
+      g[i] = math.max(-S.range, math.min(S.range, slow - peak))
+    end
+  end
+  -- Comportement façon compresseur optique (LA-2A) : la réduction arrive vite, le retour se fait en deux temps
+  -- (rapide sur la première moitié, puis lent, d'autant plus lent que la réduction a duré : « mémoire » de la cellule).
+  -- Comme l'analyse connaît la suite, les grands changements se font PENDANT LES PAUSES, là où on ne les entend pas.
+  local dt = 0.02
+  local prevv, nextv = {}, {}
+  local pv = nil
+  for i = 1, n do if voiced[i] then pv = i end; prevv[i] = pv end
+  local nx = nil
+  for i = n, 1, -1 do if voiced[i] then nx = i end; nextv[i] = nx end
+  local att_k = math.exp(-dt / 0.015)
+  local fast_k = math.exp(-dt / 0.06)
+  local first = nextv[1]
+  local y = first and g[first] or 0
+  local rel_from, held, rel_held = nil, 0, 0
+  local out = {}
+  for i = 1, n do
+    if not voiced[i] then
+      local p0, p1 = prevv[i], nextv[i]
+      local plen = ((p1 or (n + 1)) - (p0 or 0) - 1) * dt
+      if plen >= 0.25 then
+        local t2 = p1 and g[p1] or math.min(0, y)
+        -- long silence : pas de gain positif au milieu (le bruit de fond ne monte pas), on rejoint la phrase suivante juste avant
+        if plen >= 1.0 and (not p1 or (p1 - i) * dt > 0.3) then t2 = math.min(0, t2) end
+        y = y + (t2 - y) * (1 - math.exp(-dt / 0.08))
+        rel_from, held = nil, 0
+      end
+      out[i] = y
+    else
+      local tgt = g[i]
+      if tgt < y then
+        y = tgt + (y - tgt) * att_k
+        held = held + dt; rel_from = nil
+      else
+        if not rel_from then rel_from = y; rel_held = held; held = 0 end
+        local slow = S.release / 1000 * (1 + math.min(rel_held, 3) / 3)
+        local k = ((y - rel_from) < 0.5 * (tgt - rel_from)) and fast_k or math.exp(-dt / slow)
+        y = tgt + (y - tgt) * k
+        if tgt - y < 0.05 then rel_from = nil end
+      end
+      out[i] = y
+    end
+  end
+  -- anticipation de 40 ms : la réduction est en place quand la syllabe forte commence
   local sm, gmin, gmax = {}, 0, 0
   for i = 1, n do
-    local s = 0
-    for k = -R, R do s = s + ker[k] * g[math.max(1, math.min(n, i + k))] end
-    sm[i] = s / ks
+    sm[i] = out[math.min(n, i + 2)]
     if sm[i] < gmin then gmin = sm[i] end
     if sm[i] > gmax then gmax = sm[i] end
   end
@@ -399,42 +458,74 @@ local function graves_curve(A)
     sm[i] = v * 3 / ks
     if sm[i] > prox_max then prox_max = sm[i] end
   end
-  -- plosives : bouffée soudaine SOUS 90 Hz (en dessous même d'une voix grave), qui domine le reste de la voix
-  local s = S.plo_sens / 100
-  local P, PR, prs, pvs = {}, {}, {}, {}
-  for k = 1, n do
-    P[k] = db(A.pe[k])
-    PR[k] = P[k] - db(math.max(A.fe[k] - A.le[k], A.fe[k] * 0.05))
-    if voiced[k] then prs[#prs + 1] = PR[k]; pvs[#pvs + 1] = P[k] end
-  end
-  local pr_ref = pct(prs, 0.5)
-  -- niveau des graves profonds dans les passages forts de la voix : une plosive le dépasse nettement
-  local pl_ref = pct(pvs, 0.9) + 10 - 8 * s
-  local rise_thr = 16 - 8 * s
-  local ratio_thr = pr_ref + 14 - 8 * s
   local count = 0
-  local i = 11
-  while i <= n do
-    local base = 0
-    for k = i - 10, i - 3 do base = base + A.pe[k] end
-    base = db(base / 8)
-    if P[i] - base >= rise_thr and PR[i] > ratio_thr and P[i] > pl_ref then
-      local j, peak = i, P[i]
-      while j + 1 <= n and j - i < 25 and P[j + 1] > P[i] - 12 do j = j + 1; if P[j] > peak then peak = P[j] end end
-      local d = math.min(S.lo_depth, math.max(4, PR[i] - pr_ref - 4))
-      for k = math.max(1, i - 1), math.min(n, j + 8) do
-        local v = d
-        if k > j then v = d * (1 - (k - j) / 9) end      -- relâchement sur ~30 ms
-        if v > sm[k] then sm[k] = v end
-      end
-      count = count + 1
-      i = j + 8
-    else i = i + 1 end
-  end
   local pts = {}
   local dt = FR / SR
   for k = 1, n do pts[#pts + 1] = { (k - 0.5) * dt, sm[k] } end
   return simplify(pts, 0.3), count, prox_max
+end
+
+---------------------------------------------------------------- Plosives : le sub (sous 80 Hz) comparé au corps de la voix (80–200 Hz)
+-- Dans une voix, le sub reste toujours bien en dessous du corps ; une plosive (ou un souffle dans la capsule)
+-- l'envoie au-dessus. On baisse le sub de l'excès, avec 12 ms d'anticipation et un retour en 40 ms.
+-- La comparaison se fait à l'intérieur du grave : une prise très proche ne fausse donc pas la détection.
+local function sub_curve(A)
+  if S.lo_on ~= 1 or S.plo_depth <= 0 then return {}, 0 end
+  local n = math.min(#A.pe, #A.le, #A.fe)
+  if n < 10 then return {}, 0 end
+  local F, Sd, R = {}, {}, {}
+  for i = 1, n do
+    F[i] = db(A.fe[i])
+    Sd[i] = db(A.pe[i])
+    R[i] = Sd[i] - db(math.max(A.le[i] - A.pe[i], A.le[i] * 0.02))
+  end
+  local floor, hi = pct(F, 0.03), pct(F, 0.95)
+  local gate = math.max(floor + 15, hi - 35)
+  local rs, ss = {}, {}
+  for i = 1, n do if F[i] > gate then rs[#rs + 1] = R[i]; ss[#ss + 1] = Sd[i] end end
+  if #rs == 0 then return {}, 0 end
+  local rref = pct(rs, 0.5)
+  local sref = pct(ss, 0.5)
+  local fv = {}
+  for i = 1, n do if F[i] > gate then fv[#fv + 1] = F[i] end end
+  local fref = pct(fv, 0.5)                               -- niveau habituel de la voix
+  local s = S.plo_sens / 100
+  local margin = 18 - 10 * s                              -- sensibilité 50 : 13 dB au-dessus du rapport habituel de cette voix
+  -- une plosive est une ATTAQUE : le sub bondit d'au moins ~9 dB au-dessus de son propre niveau des 40 ms précédentes
+  local jump = 12 - 6 * s
+  local att = {}
+  for i = 1, n do att[i] = 0 end
+  local i = 11
+  while i <= n do
+    local base = math.huge
+    for k = i - 10, i - 2 do if Sd[k] < base then base = Sd[k] end end
+    -- … et assez fort pour s'entendre : proche du niveau de la voix elle-même (un grondement de fond ne compte pas)
+    if Sd[i] - base >= jump and R[i] - rref - margin > 0 and Sd[i] > sref + 8 and Sd[i] > fref - 8 + 8 * (1 - s) then
+      local peak, j = Sd[i], i
+      while j + 1 <= n and j - i < 30 and Sd[j + 1] > peak - 9 do j = j + 1; if Sd[j] > peak then peak = Sd[j] end end
+      for k = i, j do
+        local ex = R[k] - rref - (margin - 4)
+        if ex > 0 then att[k] = math.min(S.plo_depth, ex * 1.5) end
+      end
+      i = j + 1
+    else i = i + 1 end
+  end
+  local rel = math.exp(-(FR / SR) / 0.04)
+  local out, y, count, last_on = {}, 0, 0, -1e9
+  for i = 1, n do
+    local a = 0
+    for k = i, math.min(n, i + 3) do if att[k] > a then a = att[k] end end
+    if a >= y then
+      if a >= 4 and y < 4 and (i - last_on) * FR / SR > 0.08 then count = count + 1 end
+      y = a
+    else y = math.max(a, y * rel) end
+    if y >= 4 then last_on = i end
+    out[i] = y
+  end
+  local pts = {}
+  local dt = FR / SR
+  for i = 1, n do pts[#pts + 1] = { (i - 0.5) * dt, out[i] } end
+  return simplify(pts, 0.4), count
 end
 
 ---------------------------------------------------------------- Égalisation : spectre mesuré → correction sur 7 bandes
@@ -612,9 +703,11 @@ local function apply_take(e, A)
   reaper.TakeFX_SetParamNormalized(take, fx, 2, (S.freq - 3000) / 7000)
   reaper.TakeFX_SetParamNormalized(take, fx, 3, S.split)
   reaper.TakeFX_SetParamNormalized(take, fx, 5, (S.lowfreq - 60) / 340)
+  reaper.TakeFX_SetParamNormalized(take, fx, 14, S.lo_on == 1 and S.hpf / 150 or 0)
   local rpts, gmin, gmax = rider_curve(A)
   local dpts, count = deess_curve(A)
-  local lpts, plos, prox = graves_curve(A)
+  local lpts, _, prox = graves_curve(A)
+  local spts, plos = sub_curve(A)
   local gains, m, t, want = { 0, 0, 0, 0, 0, 0, 0 }, nil, nil, nil
   if S.eq_on == 1 then gains, m, t, want = eq_fit(A) end
   for b = 1, 7 do reaper.TakeFX_SetParamNormalized(take, fx, 5 + b, (gains[b] + 12) / 24) end
@@ -629,6 +722,11 @@ local function apply_take(e, A)
   if el then
     if #lpts == 0 then lpts = { { 0, 0 } } end
     write_env(el, lpts, function(v) return v / 24 end, A.len)
+  end
+  local es = reaper.TakeFX_GetEnvelope(take, fx, 13, true)
+  if es then
+    if #spts == 0 then spts = { { 0, 0 } } end
+    write_env(es, spts, function(v) return v / 30 end, A.len)
   end
   return true, { gmin = gmin, gmax = gmax, sib = count, plos = plos, prox = prox, gains = gains, m = m, t = t, want = want }
 end
@@ -893,7 +991,7 @@ local function draw()
   y = y + 44
   chg = slider("range", "Correction maximale", "range", 1, 15, 0.5, function(v) return string.format("± %.1f dB", v) end, x, y, w) or chg
   y = y + 44
-  chg = slider("smooth", "Douceur (rapide ↔ lent)", "smooth", 40, 400, 10, function(v) return string.format("%d ms", v) end, x, y, w) or chg
+  chg = slider("release", "Retour après une réduction (relâchement)", "release", 300, 4000, 50, function(v) return string.format("%.2f s", v / 1000) end, x, y, w) or chg
   y = y + 52
   col(COL.line); gfx.line(x, y, x + w, y)
   text("DE-ESSER — sifflantes", x, y + 10, COL.muted, 4)
@@ -916,13 +1014,15 @@ local function draw()
   if button(S.lo_on == 1 and "Activé" or "Désactivé", x + w - 100, y + 6, 100, 24, false, S.lo_on == 1) then S.lo_on = 1 - S.lo_on; chg = true end
   y = y + 40
   off = S.lo_on ~= 1
-  chg = slider("lo_depth", "Atténuation maximale", "lo_depth", 0, 18, 0.5, function(v) return string.format("%.1f dB", v) end, x, y, w, off) or chg
+  local hw2 = (w - 20) / 2
+  chg = slider("plo_depth", "Plosives : atténuation", "plo_depth", 0, 30, 1, function(v) return string.format("%d dB", v) end, x, y, hw2, off) or chg
+  chg = slider("plo_sens", "Plosives : sensibilité", "plo_sens", 0, 100, 1, function(v) return string.format("%d", v) end, x + hw2 + 20, y, hw2, off) or chg
   y = y + 44
-  chg = slider("plo_sens", "Plosives : sensibilité", "plo_sens", 0, 100, 1, function(v) return string.format("%d", v) end, x, y, w, off) or chg
+  chg = slider("lo_depth", "Proximité : atténuation", "lo_depth", 0, 18, 0.5, function(v) return string.format("%.1f dB", v) end, x, y, hw2, off) or chg
+  chg = slider("prox", "Proximité : quantité", "prox", 0, 100, 1, function(v) return string.format("%d %%", v) end, x + hw2 + 20, y, hw2, off) or chg
   y = y + 44
-  chg = slider("prox", "Effet de proximité : quantité", "prox", 0, 100, 1, function(v) return string.format("%d %%", v) end, x, y, w, off) or chg
-  y = y + 44
-  reanalyse = slider("lowfreq", "Fréquence", "lowfreq", 60, 400, 5, function(v) return string.format("%d Hz", v) end, x, y, w, off) or reanalyse
+  reanalyse = slider("lowfreq", "Proximité : fréquence", "lowfreq", 60, 400, 5, function(v) return string.format("%d Hz", v) end, x, y, hw2, off) or reanalyse
+  chg = slider("hpf", "Coupe-bas (0 = aucun)", "hpf", 0, 150, 5, function(v) return v == 0 and "aucun" or string.format("%d Hz", v) end, x + hw2 + 20, y, hw2, off) or chg
   y = y + 52
   col(COL.line); gfx.line(x, y, x + w, y)
   text("ÉGALISATION — correction tonale", x, y + 10, COL.muted, 4)
