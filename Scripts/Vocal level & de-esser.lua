@@ -20,15 +20,16 @@ local PRESETS = {
 local DEF = {
   mode = "parole", auto = 1, target = -20, amount = 80, range = 8, release = 1200,
   de_on = 1, depth = 6, sens = 50, freq = 5500, split = 1,
-  lo_on = 1, lo_depth = 9, plo_sens = 50, plo_depth = 20, hpf = 60, prox = 90, lowfreq = 200,
+  plo_on = 1, prox_on = 1, lo_depth = 9, plo_sens = 50, plo_depth = 20, hpf = 60, prox = 90, lowfreq = 200,
   eq_on = 1, eq_amount = 75, eq_color = 0, eq_max = 6,
-  rider_on = 1, adv = 0, lv_rider = 2, lv_de = 2, lv_lo = 2, lv_eq = 2,
+  rider_on = 1, adv = 0, lv_rider = 2, lv_de = 2, lv_plo = 2, lv_prox = 2, lv_eq = 2,
 }
 -- Vue simple : trois intensités par traitement (Léger, Moyen, Fort) qui règlent les curseurs avancés
 local LEVELS = {
   rider = { { amount = 50, range = 5 }, { amount = 80, range = 8 }, { amount = 95, range = 12 } },
   de = { { depth = 4, sens = 40 }, { depth = 6, sens = 50 }, { depth = 9, sens = 65 } },
-  lo = { { lo_depth = 6, plo_sens = 40, plo_depth = 12, hpf = 50, prox = 60 }, { lo_depth = 9, plo_sens = 50, plo_depth = 20, hpf = 60, prox = 90 }, { lo_depth = 12, plo_sens = 65, plo_depth = 28, hpf = 80, prox = 100 } },
+  plo = { { plo_sens = 40, plo_depth = 12, hpf = 50 }, { plo_sens = 50, plo_depth = 20, hpf = 60 }, { plo_sens = 65, plo_depth = 28, hpf = 80 } },
+  prox = { { lo_depth = 5, prox = 60 }, { lo_depth = 8, prox = 90 }, { lo_depth = 12, prox = 100 } },
   eq = { { eq_amount = 50, eq_max = 4 }, { eq_amount = 75, eq_max = 6 }, { eq_amount = 100, eq_max = 8 } },
 }
 local S = {}
@@ -198,7 +199,7 @@ local function analyse_take(e, on_progress)
         if nS % FFT_EVERY == 0 and nS >= NFFT then
           local e = 0
           for j = 0, NFFT - 1 do local v = ring[j]; e = e + v * v end
-          specs[#specs + 1] = { e = e / NFFT, b = fft_bands(ring, rpos) }
+          specs[#specs + 1] = { e = e / NFFT, b = fft_bands(ring, rpos), t = (nS - NFFT / 2) / SR }
         end
         if nK == HOP then lv[#lv + 1] = accK / HOP; accK, nK = 0, 0 end
       end
@@ -411,7 +412,7 @@ end
 ---------------------------------------------------------------- Graves : plosives et effet de proximité
 -- Renvoie l'atténuation des graves (dB, positive) sous forme de points, et le nombre de plosives.
 local function graves_curve(A)
-  if S.lo_on ~= 1 or S.lo_depth <= 0 then return {}, 0, 0 end
+  if S.prox_on ~= 1 or S.lo_depth <= 0 then return {}, 0, 0 end
   local n = math.min(#A.le, #A.fe)
   if n < 10 then return {}, 0, 0 end
   local L, F = {}, {}
@@ -462,15 +463,17 @@ local function graves_curve(A)
   local pts = {}
   local dt = FR / SR
   for k = 1, n do pts[#pts + 1] = { (k - 0.5) * dt, sm[k] } end
-  return simplify(pts, 0.3), count, prox_max
+  return simplify(pts, 0.3), count, prox_max, sm
 end
 
 ---------------------------------------------------------------- Plosives : le sub (sous 80 Hz) comparé au corps de la voix (80–200 Hz)
 -- Dans une voix, le sub reste toujours bien en dessous du corps ; une plosive (ou un souffle dans la capsule)
 -- l'envoie au-dessus. On baisse le sub de l'excès, avec 12 ms d'anticipation et un retour en 40 ms.
 -- La comparaison se fait à l'intérieur du grave : une prise très proche ne fausse donc pas la détection.
-local function sub_curve(A)
-  if S.lo_on ~= 1 or S.plo_depth <= 0 then return {}, 0 end
+-- « already(i) » : ce que les autres traitements retirent déjà dans le sub à cet instant (coupe-bas, égalisation, proximité).
+-- On ne retire que la différence : sinon les corrections s'additionnent et creusent un trou dans le grave.
+local function sub_curve(A, already)
+  if S.plo_on ~= 1 or S.plo_depth <= 0 then return {}, 0 end
   local n = math.min(#A.pe, #A.le, #A.fe)
   if n < 10 then return {}, 0 end
   local F, Sd, R = {}, {}, {}
@@ -511,16 +514,16 @@ local function sub_curve(A)
     else i = i + 1 end
   end
   local rel = math.exp(-(FR / SR) / 0.04)
-  local out, y, count, last_on = {}, 0, 0, -1e9
+  local out, y, count, last_on, prev = {}, 0, 0, -1e9, 0
   for i = 1, n do
     local a = 0
     for k = i, math.min(n, i + 3) do if att[k] > a then a = att[k] end end
-    if a >= y then
-      if a >= 4 and y < 4 and (i - last_on) * FR / SR > 0.08 then count = count + 1 end
-      y = a
-    else y = math.max(a, y * rel) end
-    if y >= 4 then last_on = i end
-    out[i] = y
+    if a >= y then y = a else y = math.max(a, y * rel) end
+    local eff = math.max(0, y - (already and already(i) or 0))
+    if eff >= 4 and prev < 4 and (i - last_on) * FR / SR > 0.08 then count = count + 1 end
+    if eff >= 4 then last_on = i end
+    prev = eff
+    out[i] = eff
   end
   local pts = {}
   local dt = FR / SR
@@ -571,7 +574,9 @@ local function target_curve()
 end
 
 -- Renvoie les 7 gains (dB) et, pour l'affichage, le spectre mesuré et la cible (alignés)
-local function eq_fit(A)
+-- prox_sm : courbe de l'effet de proximité ; les passages trop proches sont exclus de la mesure,
+-- pour que l'égalisation règle la voix « à bonne distance » et que la proximité corrige le reste (sans double correction).
+local function eq_fit(A, prox_sm)
   local zero = { 0, 0, 0, 0, 0, 0, 0 }
   local sp = A.specs or {}
   if #sp < 3 then return zero end
@@ -581,8 +586,10 @@ local function eq_fit(A)
   local gate = math.max(floor + 15, hi - 30)
   local sum, cnt = {}, 0
   for k = 1, #BANDS do sum[k] = 0 end
+  local dtf = FR / SR
   for i, b in ipairs(sp) do
-    if ed[i] > gate then
+    local close = prox_sm and b.t and (prox_sm[math.max(1, math.floor(b.t / dtf) + 1)] or 0) > 1
+    if ed[i] > gate and not close then
       cnt = cnt + 1
       for k = 1, #BANDS do sum[k] = sum[k] + b.b[k] end
     end
@@ -599,6 +606,9 @@ local function eq_fit(A)
   local ds = {}
   for k = 1, #BANDS do ds[k] = (d[math.max(1, k - 1)] + 2 * d[k] + d[math.min(#BANDS, k + 1)]) / 4 end
   for k, f in ipairs(BANDS) do
+    -- zone de tolérance : sous 250 Hz, les voix graves et aiguës diffèrent naturellement de ±4 dB (on ne corrige que le surplus)
+    local tol = f <= 250 and 4 or 1
+    ds[k] = (ds[k] > 0 and 1 or -1) * math.max(0, math.abs(ds[k]) - tol)
     if f < 125 then ds[k] = math.min(ds[k], 0) end           -- on ne remonte jamais l'infra-grave (bruits, vibrations)
     if f >= 10000 then ds[k] = math.min(ds[k], 3) end        -- ni l'extrême aigu (souffle)
     ds[k] = math.max(-S.eq_max, math.min(S.eq_max, ds[k])) * S.eq_amount / 100
@@ -646,6 +656,15 @@ local function eq_fit(A)
     local dg = solve(res)
     for b = 1, NB do g[b] = g[b] + dg[b] end
   end
+  -- la courbe finale ne doit jamais dépasser la correction maximale choisie (les filtres voisins s'additionnent)
+  local lim = S.eq_max * S.eq_amount / 100
+  local peak = 0
+  for i = 0, 60 do
+    local f = 60 * (14000 / 60) ^ (i / 60)
+    local r = math.abs(eq_response(g, f))
+    if r > peak then peak = r end
+  end
+  if peak > lim and peak > 0 then for b = 1, NB do g[b] = g[b] * lim / peak end end
   for b = 1, NB do g[b] = math.max(-12, math.min(12, math.floor(g[b] * 10 + 0.5) / 10)) end
   return g, m, t, ds
 end
@@ -703,13 +722,18 @@ local function apply_take(e, A)
   reaper.TakeFX_SetParamNormalized(take, fx, 2, (S.freq - 3000) / 7000)
   reaper.TakeFX_SetParamNormalized(take, fx, 3, S.split)
   reaper.TakeFX_SetParamNormalized(take, fx, 5, (S.lowfreq - 60) / 340)
-  reaper.TakeFX_SetParamNormalized(take, fx, 14, S.lo_on == 1 and S.hpf / 150 or 0)
+  local hpf = S.plo_on == 1 and S.hpf or 0
+  reaper.TakeFX_SetParamNormalized(take, fx, 14, hpf / 150)
   local rpts, gmin, gmax = rider_curve(A)
   local dpts, count = deess_curve(A)
-  local lpts, _, prox = graves_curve(A)
-  local spts, plos = sub_curve(A)
+  local lpts, _, prox, prox_sm = graves_curve(A)
   local gains, m, t, want = { 0, 0, 0, 0, 0, 0, 0 }, nil, nil, nil
-  if S.eq_on == 1 then gains, m, t, want = eq_fit(A) end
+  if S.eq_on == 1 then gains, m, t, want = eq_fit(A, prox_sm) end
+  -- ce qui est déjà retiré vers 50 Hz : égalisation + coupe-bas (fixes), proximité (variable)
+  local static_cut = -eq_response(gains, 50)
+  if hpf > 0 then static_cut = static_cut - 10 * math.log((50 / hpf) ^ 4 / (1 + (50 / hpf) ^ 4), 10) end
+  static_cut = math.max(0, static_cut)
+  local spts, plos = sub_curve(A, function(i) return static_cut + 0.9 * ((prox_sm and prox_sm[i]) or 0) end)
   for b = 1, 7 do reaper.TakeFX_SetParamNormalized(take, fx, 5 + b, (gains[b] + 12) / 24) end
   local er = reaper.TakeFX_GetEnvelope(take, fx, 0, true)
   local ed = reaper.TakeFX_GetEnvelope(take, fx, 1, true)
@@ -744,7 +768,7 @@ local function remove_all(list)
 end
 
 ---------------------------------------------------------------- Interface
-local AW, AH, SW, SH = 940, 640, 680, 560
+local AW, AH, SW, SH = 940, 640, 680, 624
 local W, H = AW, AH
 if S.adv ~= 1 then W, H = SW, SH end
 gfx.init(TITLE, W, H)
@@ -828,7 +852,7 @@ local function apply_all()
     local parts = {}
     if S.rider_on == 1 then parts[#parts + 1] = string.format("niveau corrigé de %+.0f à %+.0f dB", gmin, gmax) end
     if S.de_on == 1 then parts[#parts + 1] = string.format("%d sifflante%s", sib, sib > 1 and "s" or "") end
-    if S.lo_on == 1 then parts[#parts + 1] = string.format("%d plosive%s", plos, plos > 1 and "s" or "") end
+    if S.plo_on == 1 then parts[#parts + 1] = string.format("%d plosive%s", plos, plos > 1 and "s" or "") end
     if S.eq_on == 1 then parts[#parts + 1] = "égalisation appliquée" end
     UI.stats = #parts > 0 and ("Fait : " .. table.concat(parts, " · ")) or "Tous les traitements sont désactivés."
     set_msg(string.format("%d item%s traité%s. Écoutez, puis ajustez : tout se met à jour à chaque clic.", ok_n, ok_n > 1 and "s" or "", ok_n > 1 and "s" or ""))
@@ -902,7 +926,8 @@ end
 local ROWS = {
   { key = "rider_on", lv = "lv_rider", set = "rider", name = "Niveau régulier", desc = "Remonte les passages faibles, baisse les trop forts" },
   { key = "de_on", lv = "lv_de", set = "de", name = "Sifflantes", desc = "Adoucit les « s », « ch » et « z » qui sifflent" },
-  { key = "lo_on", lv = "lv_lo", set = "lo", name = "Plosives et graves", desc = "« p » et « b » qui soufflent, voix trop près du micro" },
+  { key = "plo_on", lv = "lv_plo", set = "plo", name = "Plosives", desc = "« p » et « b » qui soufflent dans le micro (bouffées de grave)" },
+  { key = "prox_on", lv = "lv_prox", set = "prox", name = "Voix trop proche", desc = "Graves qui gonflent quand on s'approche du micro" },
   { key = "eq_on", lv = "lv_eq", set = "eq", name = "Équilibre de la voix", desc = "Voix trop sourde, trop nasale ou trop brillante" },
 }
 local function draw_simple()
@@ -1010,19 +1035,20 @@ local function draw()
   -------- colonne droite
   x, y = 22 + cw + gap, 70
   col(COL.line); gfx.line(x, y, x + w, y)
-  text("GRAVES — plosives et effet de proximité", x, y + 10, COL.muted, 4)
-  if button(S.lo_on == 1 and "Activé" or "Désactivé", x + w - 100, y + 6, 100, 24, false, S.lo_on == 1) then S.lo_on = 1 - S.lo_on; chg = true end
+  text("GRAVES", x, y + 10, COL.muted, 4)
+  if button("Plosives", x + w - 206, y + 6, 100, 24, false, S.plo_on == 1) then S.plo_on = 1 - S.plo_on; chg = true end
+  if button("Proximité", x + w - 100, y + 6, 100, 24, false, S.prox_on == 1) then S.prox_on = 1 - S.prox_on; chg = true end
   y = y + 40
-  off = S.lo_on ~= 1
+  local offp, offx = S.plo_on ~= 1, S.prox_on ~= 1
   local hw2 = (w - 20) / 2
-  chg = slider("plo_depth", "Plosives : atténuation", "plo_depth", 0, 30, 1, function(v) return string.format("%d dB", v) end, x, y, hw2, off) or chg
-  chg = slider("plo_sens", "Plosives : sensibilité", "plo_sens", 0, 100, 1, function(v) return string.format("%d", v) end, x + hw2 + 20, y, hw2, off) or chg
+  chg = slider("plo_depth", "Plosives : atténuation", "plo_depth", 0, 30, 1, function(v) return string.format("%d dB", v) end, x, y, hw2, offp) or chg
+  chg = slider("plo_sens", "Plosives : sensibilité", "plo_sens", 0, 100, 1, function(v) return string.format("%d", v) end, x + hw2 + 20, y, hw2, offp) or chg
   y = y + 44
-  chg = slider("lo_depth", "Proximité : atténuation", "lo_depth", 0, 18, 0.5, function(v) return string.format("%.1f dB", v) end, x, y, hw2, off) or chg
-  chg = slider("prox", "Proximité : quantité", "prox", 0, 100, 1, function(v) return string.format("%d %%", v) end, x + hw2 + 20, y, hw2, off) or chg
+  chg = slider("lo_depth", "Proximité : atténuation", "lo_depth", 0, 18, 0.5, function(v) return string.format("%.1f dB", v) end, x, y, hw2, offx) or chg
+  chg = slider("prox", "Proximité : quantité", "prox", 0, 100, 1, function(v) return string.format("%d %%", v) end, x + hw2 + 20, y, hw2, offx) or chg
   y = y + 44
-  reanalyse = slider("lowfreq", "Proximité : fréquence", "lowfreq", 60, 400, 5, function(v) return string.format("%d Hz", v) end, x, y, hw2, off) or reanalyse
-  chg = slider("hpf", "Coupe-bas (0 = aucun)", "hpf", 0, 150, 5, function(v) return v == 0 and "aucun" or string.format("%d Hz", v) end, x + hw2 + 20, y, hw2, off) or chg
+  reanalyse = slider("lowfreq", "Proximité : fréquence", "lowfreq", 60, 400, 5, function(v) return string.format("%d Hz", v) end, x, y, hw2, offx) or reanalyse
+  chg = slider("hpf", "Coupe-bas (0 = aucun)", "hpf", 0, 150, 5, function(v) return v == 0 and "aucun" or string.format("%d Hz", v) end, x + hw2 + 20, y, hw2, offp) or chg
   y = y + 52
   col(COL.line); gfx.line(x, y, x + w, y)
   text("ÉGALISATION — correction tonale", x, y + 10, COL.muted, 4)

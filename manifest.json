@@ -2,7 +2,7 @@
   "name": "Vocal level & de-esser",
   "category": "Vocal level",
   "package": "Vocal level & de-esser",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "Nicolas Debois",
   "description": "Rend une voix parlée ou chantée plus propre en un clic : niveau régulier, sifflantes, plosives et graves (voix trop près du micro), équilibre tonal adapté à chaque voix. Analyse de tout l'item à l'avance, courbes écrites sur la prise.",
   "files": [
@@ -16,9 +16,9 @@
     }
   ],
   "changelog": [
-    "Niveau régulier plus transparent, façon compresseur optique (LA-2A) : le gain suit la phrase plutôt que les syllabes, les pointes sont rattrapées vite, le retour se fait en deux temps, et les grands changements ont lieu pendant les pauses",
-    "Plosives : nouveau traitement du sub (sous 80 Hz), jusqu'à -30 dB, qui ne se laisse plus tromper par une prise très proche du micro ni par un grondement de fond",
-    "Coupe-bas automatique (60 Hz en Moyen) quand « Plosives et graves » est actif",
-    "Réglages avancés : plosives et effet de proximité réglables séparément"
+    "Vue simple : « Plosives » et « Voix trop proche » sont maintenant deux réglages séparés",
+    "Plus de trou dans le grave : le traitement des plosives ne retire que ce que le coupe-bas, l'égalisation et la proximité n'ont pas déjà retiré",
+    "L'égalisation se règle sur les passages à bonne distance du micro (la proximité s'occupe des autres), avec une tolérance dans le grave pour les voix naturellement graves ou aiguës",
+    "La courbe d'égalisation ne dépasse jamais la correction maximale choisie"
   ]
 }
