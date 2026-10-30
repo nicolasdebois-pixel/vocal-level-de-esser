@@ -1,19 +1,19 @@
 # Vocal level & de-esser pour REAPER
 
-Nivelle une voix — parlée ou chantée — et atténue ses sifflantes, sans compresseur.
-Le script écoute tout l'item à l'avance, puis écrit deux courbes d'automation sur un petit plugin
-placé sur la **prise** (avant les effets de la piste) :
+Rend une voix — parlée ou chantée — plus propre en un clic, sans connaissances en mixage.
+L'outil écoute tout l'item, puis corrige :
 
-- **Rider** : remonte les passages trop faibles et baisse les passages trop forts, en douceur.
-  Les silences ne sont jamais remontés (le bruit de fond reste où il est).
-- **De-esser** : creuse chaque sifflante, de préférence dans les aigus seulement.
+- **Niveau régulier** : remonte les passages trop faibles, baisse les trop forts (les silences ne sont jamais remontés) ;
+- **Sifflantes** : adoucit les « s », « ch », « z » qui sifflent ;
+- **Plosives et graves** : atténue les « p » et « b » qui soufflent dans le micro, et les graves qui gonflent quand on s'en approche ;
+- **Équilibre de la voix** : corrige une voix trop sourde, trop nasale ou trop brillante, avec une égalisation calculée pour *cette* voix.
 
-Comme tout est calculé à l'avance, les corrections arrivent pile au bon moment : pas de pompage,
-pas de latence, et les courbes restent modifiables à la main. Elles suivent l'item si on le déplace ou le coupe.
+Tout est écrit sous forme de courbes d'automation et d'une égalisation sur un petit plugin placé sur la **prise**
+(avant les effets de la piste). Rien n'est figé : on peut réécouter, changer un réglage, ou tout retirer.
 
 ## Installation (ReaPack)
 1. ReaPack installé (https://reapack.com).
-2. *Extensions › ReaPack › Import repositories…* puis collez :
+2. *Extensions › ReaPack › Import repositories…*, collez :
    ```
    https://github.com/nicolasdebois-pixel/vocal-level-de-esser/raw/main/index.xml
    ```
@@ -21,19 +21,14 @@ pas de latence, et les courbes restent modifiables à la main. Elles suivent l'i
 
 ## Utilisation
 1. Sélectionnez un ou plusieurs items de voix.
-2. Lancez l'action **Vocal level & de-esser**. L'analyse démarre, puis les courbes s'écrivent.
-3. Écoutez, ajustez les curseurs : les courbes se réécrivent à chaque réglage, instantanément.
-4. **Retirer** enlève le plugin et ses courbes des items sélectionnés.
+2. Lancez l'action **Vocal level & de-esser**.
+3. Choisissez **Parole** ou **Chant**, puis cliquez sur **Analyser et appliquer**.
+4. Écoutez. Si un traitement en fait trop ou pas assez, passez-le en **Léger** ou **Fort** : le résultat se met à jour aussitôt.
+   Décochez un traitement pour le couper.
+5. **Retirer** enlève tout des items sélectionnés.
 
-### Les réglages
-- **Parole / Chant** : préréglages. Le chant est corrigé plus doucement, pour garder les nuances.
-- **Cible** : *automatique* nivelle autour du niveau habituel de la voix ; *fixe* vise un niveau précis.
-- **Quantité** : 100 % ramène tout au même niveau ; 50 % réduit les écarts de moitié.
-- **Correction maximale** : limite les corrections, vers le haut comme vers le bas.
-- **Douceur** : vitesse à laquelle le niveau suit la voix (rapide = au mot près, lent = à la phrase).
-- **Atténuation maximale** du de-esser, **Sensibilité** (plus haut = plus de sifflantes traitées),
-  **Fréquence** (où commencent les sifflantes de cette voix : souvent 5 à 7 kHz, plus haut pour une voix aiguë).
-- **Aigus seulement** (recommandé) ou **Tout le signal** pour le de-esser.
+**Réglages avancés** donne accès à tous les curseurs (fréquences, quantités, couleur de l'égalisation…)
+et montre la courbe d'égalisation calculée.
 
 Avec PodSuite : appliquez-le **après** le dérushage, sur des items qui ne bougeront plus.
 

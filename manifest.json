@@ -2,14 +2,23 @@
   "name": "Vocal level & de-esser",
   "category": "Vocal level",
   "package": "Vocal level & de-esser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Nicolas Debois",
-  "description": "Nivelle une voix parlée ou chantée et atténue ses sifflantes, en écrivant des courbes d'automation sur la prise. Analyse de tout l'item à l'avance : aucune latence, aucun pompage.",
+  "description": "Rend une voix parlée ou chantée plus propre en un clic : niveau régulier, sifflantes, plosives et graves (voix trop près du micro), équilibre tonal adapté à chaque voix. Analyse de tout l'item à l'avance, courbes écrites sur la prise.",
   "files": [
-    {"path": "Scripts/Vocal level & de-esser.lua", "main": true},
-    {"path": "Effects/Vocal level.jsfx", "type": "effect"}
+    {
+      "path": "Scripts/Vocal level & de-esser.lua",
+      "main": true
+    },
+    {
+      "path": "Effects/Vocal level.jsfx",
+      "type": "effect"
+    }
   ],
   "changelog": [
-    "Première version : rider (préréglages Parole et Chant) et de-esser par bande d'aigus, courbes écrites sur la prise"
+    "Vue simple : type de voix, quatre traitements avec Léger / Moyen / Fort, un seul bouton ; les curseurs détaillés restent dans « Réglages avancés »",
+    "Nouveau : plosives (« p », « b » qui soufflent) et effet de proximité (graves qui gonflent quand on s'approche du micro)",
+    "Nouveau : équilibre de la voix — égalisation sur 7 bandes calculée pour chaque voix, comparée à une voix de référence",
+    "Le niveau régulier peut être désactivé"
   ]
 }

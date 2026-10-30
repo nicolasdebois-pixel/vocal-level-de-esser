@@ -1,6 +1,7 @@
 -- Vocal level & de-esser
--- Nivelle une voix (parlée ou chantée) et atténue ses sifflantes en écrivant des courbes
--- d'automation sur un petit plugin placé sur la PRISE (avant les effets de la piste).
+-- Nivelle une voix (parlée ou chantée), atténue ses sifflantes, ses plosives et l'effet de proximité,
+-- et corrige son équilibre tonal, en écrivant des courbes d'automation et une égalisation sur un
+-- petit plugin placé sur la PRISE (avant les effets de la piste).
 -- L'analyse lit tout l'item à l'avance : les corrections arrivent pile au bon moment, sans pompage.
 -- Les courbes restent collées à l'item : on peut le déplacer ou le couper ensuite.
 local TITLE = "Vocal level & de-esser"
@@ -19,6 +20,16 @@ local PRESETS = {
 local DEF = {
   mode = "parole", auto = 1, target = -20, amount = 80, range = 8, smooth = 120,
   de_on = 1, depth = 6, sens = 50, freq = 5500, split = 1,
+  lo_on = 1, lo_depth = 9, plo_sens = 50, prox = 90, lowfreq = 200,
+  eq_on = 1, eq_amount = 75, eq_color = 0, eq_max = 6,
+  rider_on = 1, adv = 0, lv_rider = 2, lv_de = 2, lv_lo = 2, lv_eq = 2,
+}
+-- Vue simple : trois intensités par traitement (Léger, Moyen, Fort) qui règlent les curseurs avancés
+local LEVELS = {
+  rider = { { amount = 50, range = 5 }, { amount = 80, range = 8 }, { amount = 95, range = 12 } },
+  de = { { depth = 4, sens = 40 }, { depth = 6, sens = 50 }, { depth = 9, sens = 65 } },
+  lo = { { lo_depth = 6, plo_sens = 40, prox = 60 }, { lo_depth = 9, plo_sens = 50, prox = 90 }, { lo_depth = 12, plo_sens = 65, prox = 100 } },
+  eq = { { eq_amount = 50, eq_max = 4 }, { eq_amount = 75, eq_max = 6 }, { eq_amount = 100, eq_max = 8 } },
 }
 local S = {}
 for k, v in pairs(DEF) do
@@ -35,6 +46,8 @@ local function biquad(kind, f, gain_db, q)
   local b0, b1, b2, a0, a1, a2
   if kind == "hp" then
     b0, b1, b2 = (1 + c) / 2, -(1 + c), (1 + c) / 2; a0, a1, a2 = 1 + al, -2 * c, 1 - al
+  elseif kind == "lp" then
+    b0, b1, b2 = (1 - c) / 2, 1 - c, (1 - c) / 2; a0, a1, a2 = 1 + al, -2 * c, 1 - al
   else -- plateau aigu (RBJ)
     local A = 10 ^ (gain_db / 40); local sq = 2 * math.sqrt(A) * al
     b0 = A * ((A + 1) + (A - 1) * c + sq); b1 = -2 * A * ((A - 1) + (A + 1) * c); b2 = A * ((A + 1) + (A - 1) * c - sq)
@@ -47,7 +60,7 @@ end
 local function take_key(item, take)
   local _, g = reaper.GetSetMediaItemTakeInfo_String(take, "GUID", "", false)
   return table.concat({ g, reaper.GetMediaItemInfo_Value(item, "D_LENGTH"), reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS"),
-    reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE"), S.freq }, "|")
+    reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE"), S.freq, S.lowfreq }, "|")
 end
 
 local function selected_takes()
@@ -74,6 +87,57 @@ end
 local HOP, FR = 480, 96                 -- 20 ms et 4 ms à 24 kHz
 local cache = {}
 
+-- spectre : FFT de 1024 points (≈ 43 ms) toutes les 200 ms, regroupée en tiers d'octave
+local NFFT, FFT_EVERY = 1024, 4800
+local BANDS = { 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500 }
+-- spectre moyen de référence de la voix parlée (tiers d'octave, d'après le spectre moyen international de la parole)
+local LTASS = { 54.4, 57.7, 56.8, 60.2, 60.3, 59.0, 62.1, 62.1, 60.5, 56.8, 53.7, 53.0, 52.0, 48.7, 48.1, 46.8, 45.6, 44.5, 44.3, 43.7, 43.4, 41.3 }
+local fft_rev, fft_cos, fft_sin, hann, band_bins = {}, {}, {}, {}, {}
+do
+  local bits = 10
+  for i = 0, NFFT - 1 do
+    local r, v = 0, i
+    for _ = 1, bits do r = (r << 1) | (v & 1); v = v >> 1 end
+    fft_rev[i] = r
+  end
+  for k = 0, NFFT / 2 - 1 do fft_cos[k] = math.cos(-2 * math.pi * k / NFFT); fft_sin[k] = math.sin(-2 * math.pi * k / NFFT) end
+  for i = 0, NFFT - 1 do hann[i] = 0.5 - 0.5 * math.cos(2 * math.pi * i / (NFFT - 1)) end
+  for b, fc in ipairs(BANDS) do
+    local lo, hi = fc / 2 ^ (1 / 6), fc * 2 ^ (1 / 6)
+    band_bins[b] = { math.max(1, math.floor(lo * NFFT / SR + 0.5)), math.min(NFFT / 2 - 1, math.floor(hi * NFFT / SR + 0.5)) }
+  end
+end
+local function fft_bands(ring, pos)
+  local re, im = {}, {}
+  for i = 0, NFFT - 1 do
+    local x = ring[(pos + i) % NFFT] or 0
+    local j = fft_rev[i]
+    re[j] = x * hann[i]; im[j] = 0
+  end
+  local size = 2
+  while size <= NFFT do
+    local half, step = size // 2, NFFT // size
+    for st = 0, NFFT - 1, size do
+      for k = 0, half - 1 do
+        local c, s = fft_cos[k * step], fft_sin[k * step]
+        local a, b = st + k, st + k + half
+        local tr = re[b] * c - im[b] * s
+        local ti = re[b] * s + im[b] * c
+        re[b] = re[a] - tr; im[b] = im[a] - ti
+        re[a] = re[a] + tr; im[a] = im[a] + ti
+      end
+    end
+    size = size * 2
+  end
+  local out = {}
+  for b = 1, #BANDS do
+    local sum = 0
+    for k = band_bins[b][1], band_bins[b][2] do sum = sum + re[k] * re[k] + im[k] * im[k] end
+    out[b] = sum
+  end
+  return out
+end
+
 local function analyse_take(e, on_progress)
   local item, take = e.item, e.take
   local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
@@ -87,8 +151,11 @@ local function analyse_take(e, on_progress)
   local buf = reaper.new_array(BLOCK * nch)
   local k1, k2 = biquad("hp", 70), biquad("hs", 1500, 4, 0.7071)
   local h1, h2 = biquad("hp", S.freq), biquad("hp", S.freq)
-  local lv, fe, he = {}, {}, {}                      -- énergies par bloc de 20 ms / trames de 4 ms
-  local accK, nK, accF, accH, nF = 0, 0, 0, 0, 0
+  local l1, l2 = biquad("lp", S.lowfreq), biquad("lp", S.lowfreq)
+  local m1, m2 = biquad("lp", 90), biquad("lp", 90)          -- bande des plosives (sous la voix, même grave)
+  local lv, fe, he, le, pe = {}, {}, {}, {}, {}      -- énergies par bloc de 20 ms / trames de 4 ms
+  local accK, nK, accF, accH, accL, accP, nF = 0, 0, 0, 0, 0, 0, 0
+  local ring, rpos, nS, specs = {}, 0, 0, {}
   local done = 0
   return function()
     local deadline = reaper.time_precise() + 0.04
@@ -101,6 +168,10 @@ local function analyse_take(e, on_progress)
       local b1, b2, b3, b4, b5, y1, y2 = k2[1], k2[2], k2[3], k2[4], k2[5], k2[6], k2[7]
       local c1, c2, c3, c4, c5, u1, u2 = h1[1], h1[2], h1[3], h1[4], h1[5], h1[6], h1[7]
       local d1, d2, d3, d4, d5, v1, v2 = h2[1], h2[2], h2[3], h2[4], h2[5], h2[6], h2[7]
+      local e1, e2, e3, e4, e5, w1, w2 = l1[1], l1[2], l1[3], l1[4], l1[5], l1[6], l1[7]
+      local f1, f2, f3, f4, f5, q1, q2 = l2[1], l2[2], l2[3], l2[4], l2[5], l2[6], l2[7]
+      local g1, g2, g3, g4, g5, r1, r2 = m1[1], m1[2], m1[3], m1[4], m1[5], m1[6], m1[7]
+      local j1, j2, j3, j4, j5, o1, o2 = m2[1], m2[2], m2[3], m2[4], m2[5], m2[6], m2[7]
       for i = 1, n do
         local x
         if nch == 2 then x = (t[2 * i - 1] + t[2 * i]) * 0.5 else x = t[i] end
@@ -113,18 +184,34 @@ local function analyse_take(e, on_progress)
         -- niveau du rider : bande vocale SOUS la fréquence du de-esser (les sifflantes ne font pas baisser la voix)
         local lo = k - h
         accK = accK + lo * lo; nK = nK + 1
-        accF = accF + p * p; accH = accH + h * h; nF = nF + 1
-        if nF == FR then fe[#fe + 1] = accF / FR; he[#he + 1] = accH / FR; accF, accH, nF = 0, 0, 0 end
+        -- graves (passe-bas 4e ordre sur le son brut : les plosives descendent sous 70 Hz)
+        local ll = e1 * x + w1; w1 = e2 * x - e4 * ll + w2; w2 = e3 * x - e5 * ll
+        local l = f1 * ll + q1; q1 = f2 * ll - f4 * l + q2; q2 = f3 * ll - f5 * l
+        local pp = g1 * x + r1; r1 = g2 * x - g4 * pp + r2; r2 = g3 * x - g5 * pp
+        local pl = j1 * pp + o1; o1 = j2 * pp - j4 * pl + o2; o2 = j3 * pp - j5 * pl
+        accF = accF + p * p; accH = accH + h * h; accL = accL + l * l; accP = accP + pl * pl; nF = nF + 1
+        if nF == FR then
+          fe[#fe + 1] = accF / FR; he[#he + 1] = accH / FR; le[#le + 1] = accL / FR; pe[#pe + 1] = accP / FR
+          accF, accH, accL, accP, nF = 0, 0, 0, 0, 0
+        end
+        ring[rpos] = x; rpos = (rpos + 1) % NFFT; nS = nS + 1
+        if nS % FFT_EVERY == 0 and nS >= NFFT then
+          local e = 0
+          for j = 0, NFFT - 1 do local v = ring[j]; e = e + v * v end
+          specs[#specs + 1] = { e = e / NFFT, b = fft_bands(ring, rpos) }
+        end
         if nK == HOP then lv[#lv + 1] = accK / HOP; accK, nK = 0, 0 end
       end
       k1[6], k1[7], k2[6], k2[7], h1[6], h1[7], h2[6], h2[7] = z1, z2, y1, y2, u1, u2, v1, v2
+      l1[6], l1[7], l2[6], l2[7] = w1, w2, q1, q2
+      m1[6], m1[7], m2[6], m2[7] = r1, r2, o1, o2
       done = done + n
     end
     if on_progress then on_progress(done / math.max(1, total)) end
     if done < total then return false end
     reaper.DestroyAudioAccessor(acc)
     if fx >= 0 then reaper.TakeFX_SetEnabled(take, fx, was) end
-    return true, { len = len, lv = lv, fe = fe, he = he }
+    return true, { len = len, lv = lv, fe = fe, he = he, le = le, pe = pe, specs = specs }
   end
 end
 
@@ -160,6 +247,7 @@ local function simplify(pts, tol)
 end
 
 local function rider_curve(A)
+  if S.rider_on ~= 1 then return { { 0, 0 } }, 0, 0, nil end
   local win = math.max(1, math.floor((S.mode == "chant" and 0.3 or 0.4) / 0.02 + 0.5))
   local L, n = {}, #A.lv
   local run = 0
@@ -261,6 +349,216 @@ local function deess_curve(A)
   return pts, count
 end
 
+---------------------------------------------------------------- Graves : plosives et effet de proximité
+-- Renvoie l'atténuation des graves (dB, positive) sous forme de points, et le nombre de plosives.
+local function graves_curve(A)
+  if S.lo_on ~= 1 or S.lo_depth <= 0 then return {}, 0, 0 end
+  local n = math.min(#A.le, #A.fe)
+  if n < 10 then return {}, 0, 0 end
+  local L, F = {}, {}
+  for i = 1, n do L[i] = db(A.le[i]); F[i] = db(A.fe[i]) end
+  local floor = pct(F, 0.03)
+  local hi = pct(F, 0.95)
+  local gate = math.max(floor + 15, hi - 35)
+  local voiced, ratios, lows = {}, {}, {}
+  -- proximité : part des graves sur 300 ms (moyenne d'énergie), comparée à la part habituelle de cette voix
+  local W = 75
+  local sl, sf = 0, 0
+  local R = {}
+  for i = 1, n do
+    -- graves comparés au reste de la voix (sans les graves eux-mêmes)
+    sl = sl + A.le[i]; sf = sf + math.max(A.fe[i] - A.le[i], A.fe[i] * 0.05)
+    if i > W then sl = sl - A.le[i - W]; sf = sf - math.max(A.fe[i - W] - A.le[i - W], A.fe[i - W] * 0.05) end
+    R[i] = db(sl) - db(sf)
+  end
+  local Rc = {}
+  for i = 1, n do Rc[i] = R[math.min(n, i + W // 2)] end
+  for i = 1, n do
+    voiced[i] = F[i] > gate
+    if voiced[i] then ratios[#ratios + 1] = Rc[i]; lows[#lows + 1] = L[i] end
+  end
+  if #ratios == 0 then return {}, 0, 0 end
+  -- référence : la voix « à bonne distance » (30e centile : les passages trop proches et les plosives ne la faussent pas)
+  local ref = pct(ratios, 0.3)
+  local lowref = pct(lows, 0.5)
+  local att = {}
+  local prox_max = 0
+  for i = 1, n do
+    -- ×1,4 : un plateau n'atteint sa pleine atténuation que bien en dessous de sa fréquence
+    local ex = voiced[i] and math.max(0, Rc[i] - ref - 1) * 1.4 * S.prox / 100 or 0
+    att[i] = math.min(S.lo_depth, ex)
+  end
+  -- lissage (100 ms) : l'effet de proximité varie lentement
+  local sig, Rk = 25, 75
+  local ker, ks = {}, 0
+  for k = -Rk, Rk do ker[k] = math.exp(-(k * k) / (2 * sig * sig)); ks = ks + ker[k] end
+  local sm = {}
+  for i = 1, n do
+    local v = 0
+    for k = -Rk, Rk, 3 do v = v + ker[k] * att[math.max(1, math.min(n, i + k))] end
+    sm[i] = v * 3 / ks
+    if sm[i] > prox_max then prox_max = sm[i] end
+  end
+  -- plosives : bouffée soudaine SOUS 90 Hz (en dessous même d'une voix grave), qui domine le reste de la voix
+  local s = S.plo_sens / 100
+  local P, PR, prs, pvs = {}, {}, {}, {}
+  for k = 1, n do
+    P[k] = db(A.pe[k])
+    PR[k] = P[k] - db(math.max(A.fe[k] - A.le[k], A.fe[k] * 0.05))
+    if voiced[k] then prs[#prs + 1] = PR[k]; pvs[#pvs + 1] = P[k] end
+  end
+  local pr_ref = pct(prs, 0.5)
+  -- niveau des graves profonds dans les passages forts de la voix : une plosive le dépasse nettement
+  local pl_ref = pct(pvs, 0.9) + 10 - 8 * s
+  local rise_thr = 16 - 8 * s
+  local ratio_thr = pr_ref + 14 - 8 * s
+  local count = 0
+  local i = 11
+  while i <= n do
+    local base = 0
+    for k = i - 10, i - 3 do base = base + A.pe[k] end
+    base = db(base / 8)
+    if P[i] - base >= rise_thr and PR[i] > ratio_thr and P[i] > pl_ref then
+      local j, peak = i, P[i]
+      while j + 1 <= n and j - i < 25 and P[j + 1] > P[i] - 12 do j = j + 1; if P[j] > peak then peak = P[j] end end
+      local d = math.min(S.lo_depth, math.max(4, PR[i] - pr_ref - 4))
+      for k = math.max(1, i - 1), math.min(n, j + 8) do
+        local v = d
+        if k > j then v = d * (1 - (k - j) / 9) end      -- relâchement sur ~30 ms
+        if v > sm[k] then sm[k] = v end
+      end
+      count = count + 1
+      i = j + 8
+    else i = i + 1 end
+  end
+  local pts = {}
+  local dt = FR / SR
+  for k = 1, n do pts[#pts + 1] = { (k - 0.5) * dt, sm[k] } end
+  return simplify(pts, 0.3), count, prox_max
+end
+
+---------------------------------------------------------------- Égalisation : spectre mesuré → correction sur 7 bandes
+local EQB = { { 1, 100, 0.7 }, { 0, 220, 1 }, { 0, 450, 1 }, { 0, 900, 1 }, { 0, 1800, 1 }, { 0, 3600, 1 }, { 2, 8000, 0.7 } }
+local function eq_db(type_, f0, g, q, f)                -- réponse (dB) d'un filtre RBJ à 48 kHz
+  local fs = 48000
+  local A = 10 ^ (g / 40); local w = 2 * math.pi * f0 / fs; local c, sn = math.cos(w), math.sin(w); local al = sn / (2 * q)
+  local b0, b1, b2, a0, a1, a2
+  if type_ == 0 then
+    b0, b1, b2, a0, a1, a2 = 1 + al * A, -2 * c, 1 - al * A, 1 + al / A, -2 * c, 1 - al / A
+  else
+    local sq = 2 * math.sqrt(A) * al
+    if type_ == 1 then
+      b0 = A * ((A + 1) - (A - 1) * c + sq); b1 = 2 * A * ((A - 1) - (A + 1) * c); b2 = A * ((A + 1) - (A - 1) * c - sq)
+      a0 = (A + 1) + (A - 1) * c + sq; a1 = -2 * ((A - 1) + (A + 1) * c); a2 = (A + 1) + (A - 1) * c - sq
+    else
+      b0 = A * ((A + 1) + (A - 1) * c + sq); b1 = -2 * A * ((A - 1) + (A + 1) * c); b2 = A * ((A + 1) + (A - 1) * c - sq)
+      a0 = (A + 1) - (A - 1) * c + sq; a1 = 2 * ((A - 1) - (A + 1) * c); a2 = (A + 1) - (A - 1) * c - sq
+    end
+  end
+  local wf = 2 * math.pi * f / fs
+  local c1, s1, c2, s2 = math.cos(wf), math.sin(wf), math.cos(2 * wf), math.sin(2 * wf)
+  local nr, ni = b0 + b1 * c1 + b2 * c2, -(b1 * s1 + b2 * s2)
+  local dr, di = a0 + a1 * c1 + a2 * c2, -(a1 * s1 + a2 * s2)
+  return 10 * math.log((nr * nr + ni * ni) / (dr * dr + di * di), 10)
+end
+local function eq_response(gains, f)
+  local r = 0
+  for b, e in ipairs(EQB) do if math.abs(gains[b]) > 0.01 then r = r + eq_db(e[1], e[2], gains[b], e[3], f) end end
+  return r
+end
+
+local function target_curve()
+  local t = {}
+  for k, f in ipairs(BANDS) do
+    local v = LTASS[k]
+    local oct = math.log(f / 1000, 2)
+    if S.mode == "chant" then v = v + math.max(0, math.min(1, (oct + 0.5) / 2)) * 2.5 end   -- formant du chanteur, plus de brillance
+    v = v + S.eq_color * math.max(-1 / 3, math.min(1, oct / 3))                             -- couleur : sombre ↔ brillant
+    t[k] = v
+  end
+  return t
+end
+
+-- Renvoie les 7 gains (dB) et, pour l'affichage, le spectre mesuré et la cible (alignés)
+local function eq_fit(A)
+  local zero = { 0, 0, 0, 0, 0, 0, 0 }
+  local sp = A.specs or {}
+  if #sp < 3 then return zero end
+  local ed = {}
+  for i, b in ipairs(sp) do ed[i] = db(b.e) end
+  local floor, hi = pct(ed, 0.05), pct(ed, 0.95)
+  local gate = math.max(floor + 15, hi - 30)
+  local sum, cnt = {}, 0
+  for k = 1, #BANDS do sum[k] = 0 end
+  for i, b in ipairs(sp) do
+    if ed[i] > gate then
+      cnt = cnt + 1
+      for k = 1, #BANDS do sum[k] = sum[k] + b.b[k] end
+    end
+  end
+  if cnt < 3 then return zero end
+  local m, t = {}, target_curve()
+  for k = 1, #BANDS do m[k] = db(sum[k] / cnt) end
+  local off, no = 0, 0
+  for k, f in ipairs(BANDS) do if f >= 250 and f <= 4000 then off = off + (m[k] - t[k]); no = no + 1 end end
+  off = off / no
+  for k = 1, #BANDS do m[k] = m[k] - off end
+  local d = {}
+  for k = 1, #BANDS do d[k] = t[k] - m[k] end
+  local ds = {}
+  for k = 1, #BANDS do ds[k] = (d[math.max(1, k - 1)] + 2 * d[k] + d[math.min(#BANDS, k + 1)]) / 4 end
+  for k, f in ipairs(BANDS) do
+    if f < 125 then ds[k] = math.min(ds[k], 0) end           -- on ne remonte jamais l'infra-grave (bruits, vibrations)
+    if f >= 10000 then ds[k] = math.min(ds[k], 3) end        -- ni l'extrême aigu (souffle)
+    ds[k] = math.max(-S.eq_max, math.min(S.eq_max, ds[k])) * S.eq_amount / 100
+  end
+  -- moindres carrés : quelle combinaison des 7 filtres approche le mieux la correction voulue ?
+  local NB = #EQB
+  local Sm = {}
+  for b = 1, NB do Sm[b] = {} for k, f in ipairs(BANDS) do Sm[b][k] = eq_db(EQB[b][1], EQB[b][2], 1, EQB[b][3], f) end end
+  local function solve(dd)
+    local M, v = {}, {}
+    for i = 1, NB do
+      M[i] = {}
+      for j = 1, NB do
+        local acc = (i == j) and 0.3 or 0
+        for k = 1, #BANDS do acc = acc + Sm[i][k] * Sm[j][k] end
+        M[i][j] = acc
+      end
+      local acc = 0
+      for k = 1, #BANDS do acc = acc + Sm[i][k] * dd[k] end
+      v[i] = acc
+    end
+    for c = 1, NB do                                        -- élimination de Gauss
+      local piv = c
+      for r = c + 1, NB do if math.abs(M[r][c]) > math.abs(M[piv][c]) then piv = r end end
+      M[c], M[piv] = M[piv], M[c]; v[c], v[piv] = v[piv], v[c]
+      for r = c + 1, NB do
+        local fct = M[r][c] / M[c][c]
+        for j = c, NB do M[r][j] = M[r][j] - fct * M[c][j] end
+        v[r] = v[r] - fct * v[c]
+      end
+    end
+    local g = {}
+    for r = NB, 1, -1 do
+      local acc = v[r]
+      for j = r + 1, NB do acc = acc - M[r][j] * g[j] end
+      g[r] = acc / M[r][r]
+    end
+    return g
+  end
+  local g = solve(ds)
+  -- les filtres ne sont pas tout à fait linéaires en dB : deux passes de correction du résidu
+  for _ = 1, 2 do
+    local res = {}
+    for k, f in ipairs(BANDS) do res[k] = ds[k] - eq_response(g, f) end
+    local dg = solve(res)
+    for b = 1, NB do g[b] = g[b] + dg[b] end
+  end
+  for b = 1, NB do g[b] = math.max(-12, math.min(12, math.floor(g[b] * 10 + 0.5) / 10)) end
+  return g, m, t, ds
+end
+
 ---------------------------------------------------------------- Écriture dans REAPER
 local function jsfx_name()
   -- ReaPack installe le plugin dans Effects/<dépôt>/<catégorie>/ ; on retrouve ce chemin depuis celui du script
@@ -313,16 +611,26 @@ local function apply_take(e, A)
   end
   reaper.TakeFX_SetParamNormalized(take, fx, 2, (S.freq - 3000) / 7000)
   reaper.TakeFX_SetParamNormalized(take, fx, 3, S.split)
+  reaper.TakeFX_SetParamNormalized(take, fx, 5, (S.lowfreq - 60) / 340)
   local rpts, gmin, gmax = rider_curve(A)
   local dpts, count = deess_curve(A)
+  local lpts, plos, prox = graves_curve(A)
+  local gains, m, t, want = { 0, 0, 0, 0, 0, 0, 0 }, nil, nil, nil
+  if S.eq_on == 1 then gains, m, t, want = eq_fit(A) end
+  for b = 1, 7 do reaper.TakeFX_SetParamNormalized(take, fx, 5 + b, (gains[b] + 12) / 24) end
   local er = reaper.TakeFX_GetEnvelope(take, fx, 0, true)
   local ed = reaper.TakeFX_GetEnvelope(take, fx, 1, true)
+  local el = reaper.TakeFX_GetEnvelope(take, fx, 4, true)
   if er then write_env(er, rpts, function(v) return (v + 24) / 48 end, A.len) end
   if ed then
     if #dpts == 0 then dpts = { { 0, 0 } } end
     write_env(ed, dpts, function(v) return v / 24 end, A.len)
   end
-  return true, { gmin = gmin, gmax = gmax, sib = count }
+  if el then
+    if #lpts == 0 then lpts = { { 0, 0 } } end
+    write_env(el, lpts, function(v) return v / 24 end, A.len)
+  end
+  return true, { gmin = gmin, gmax = gmax, sib = count, plos = plos, prox = prox, gains = gains, m = m, t = t, want = want }
 end
 
 local function remove_all(list)
@@ -338,7 +646,9 @@ local function remove_all(list)
 end
 
 ---------------------------------------------------------------- Interface
-local W, H = 540, 650
+local AW, AH, SW, SH = 940, 640, 680, 560
+local W, H = AW, AH
+if S.adv ~= 1 then W, H = SW, SH end
 gfx.init(TITLE, W, H)
 local UI = { msg = "", progress = nil, drag = nil, mouse_was = false, stats = nil }
 local takes = selected_takes()
@@ -395,7 +705,8 @@ local function slider(id, label, key, mn, mx, step, fmt, x, y, w, disabled)
 end
 
 local function apply_all()
-  local ok_n, err, gmin, gmax, sib = 0, nil, 0, 0, 0
+  local ok_n, err, gmin, gmax, sib, plos = 0, nil, 0, 0, 0, 0
+  UI.eq = nil
   reaper.Undo_BeginBlock()
   reaper.PreventUIRefresh(1)
   for _, e in ipairs(takes) do
@@ -404,7 +715,8 @@ local function apply_all()
       local ok, r = apply_take(e, A)
       if ok then
         ok_n = ok_n + 1
-        gmin = math.min(gmin, r.gmin); gmax = math.max(gmax, r.gmax); sib = sib + r.sib
+        gmin = math.min(gmin, r.gmin); gmax = math.max(gmax, r.gmax); sib = sib + r.sib; plos = plos + r.plos
+        if not UI.eq and r.m then UI.eq = r end                -- courbe d'égalisation du premier item, pour l'affichage
       else err = r end
     end
   end
@@ -415,8 +727,13 @@ local function apply_all()
   if err and ok_n == 0 then
     set_msg("Plugin « Vocal level » introuvable : réinstallez le paquet avec ReaPack.")
   else
-    UI.stats = string.format("Rider : de %+.1f à %+.1f dB · %d sifflante%s atténuée%s", gmin, gmax, sib, sib > 1 and "s" or "", sib > 1 and "s" or "")
-    set_msg(string.format("Courbes écrites sur %d item%s. Écoutez, ajustez : tout se réécrit à chaque réglage.", ok_n, ok_n > 1 and "s" or ""))
+    local parts = {}
+    if S.rider_on == 1 then parts[#parts + 1] = string.format("niveau corrigé de %+.0f à %+.0f dB", gmin, gmax) end
+    if S.de_on == 1 then parts[#parts + 1] = string.format("%d sifflante%s", sib, sib > 1 and "s" or "") end
+    if S.lo_on == 1 then parts[#parts + 1] = string.format("%d plosive%s", plos, plos > 1 and "s" or "") end
+    if S.eq_on == 1 then parts[#parts + 1] = "égalisation appliquée" end
+    UI.stats = #parts > 0 and ("Fait : " .. table.concat(parts, " · ")) or "Tous les traitements sont désactivés."
+    set_msg(string.format("%d item%s traité%s. Écoutez, puis ajustez : tout se met à jour à chaque clic.", ok_n, ok_n > 1 and "s" or "", ok_n > 1 and "s" or ""))
   end
 end
 
@@ -439,65 +756,204 @@ local function start_analysis()
   end
 end
 
+local function eq_graph(x, y, w, h)
+  col(COL.panel); gfx.rect(x, y, w, h, 1)
+  local fmin, fmax, dbr = 80, 14000, 12
+  local function fx(f) return x + w * math.log(f / fmin) / math.log(fmax / fmin) end
+  local function fy(v) return y + h / 2 - v / dbr * (h / 2 - 6) end
+  col(COL.line)
+  for _, f in ipairs({ 100, 1000, 10000 }) do gfx.line(fx(f), y, fx(f), y + h) end
+  gfx.line(x, fy(0), x + w, fy(0))
+  gfx.setfont(2)
+  for _, f in ipairs({ { 100, "100" }, { 1000, "1k" }, { 10000, "10k" } }) do col(COL.muted); gfx.x, gfx.y = fx(f[1]) + 3, y + h - 14; gfx.drawstr(f[2]) end
+  local r = UI.eq
+  if not r or S.eq_on ~= 1 then
+    col(COL.muted); gfx.x, gfx.y = x + 10, y + 8; gfx.drawstr(S.eq_on == 1 and "La courbe apparaît après l'analyse." or "Égalisation désactivée.")
+    return
+  end
+  -- écart mesuré (gris) et correction appliquée (orange)
+  local px, py
+  col(COL.muted, 0.8)
+  for k, f in ipairs(BANDS) do
+    local v = math.max(-dbr, math.min(dbr, r.m[k] - r.t[k]))
+    local X, Y = fx(f), fy(v)
+    if px then gfx.line(px, py, X, Y, 1) end
+    px, py = X, Y
+  end
+  px = nil
+  col(COL.accent)
+  for i = 0, 120 do
+    local f = fmin * (fmax / fmin) ^ (i / 120)
+    local X, Y = fx(f), fy(math.max(-dbr, math.min(dbr, eq_response(r.gains, f))))
+    if px then gfx.line(px, py, X, Y, 1); gfx.line(px, py + 1, X, Y + 1, 1) end
+    px, py = X, Y
+  end
+  gfx.setfont(2); col(COL.muted); gfx.x, gfx.y = x + 8, y + 6; gfx.drawstr("gris : écart de la voix à la référence")
+  col(COL.accent); gfx.x, gfx.y = x + 8, y + 20; gfx.drawstr("orange : correction appliquée")
+end
+
+local function resize_to(adv)
+  S.adv = adv
+  W, H = adv == 1 and AW or SW, adv == 1 and AH or SH
+  gfx.quit(); gfx.init(TITLE, W, H)
+  gfx.setfont(1, "Arial", 15); gfx.setfont(2, "Arial", 13); gfx.setfont(3, "Arial", 19, string.byte("b")); gfx.setfont(4, "Arial", 13, string.byte("b"))
+  UI.skip_click = true
+end
+
+-- Vue simple : un choix Parole / Chant, quatre traitements avec une intensité chacun, un bouton
+local ROWS = {
+  { key = "rider_on", lv = "lv_rider", set = "rider", name = "Niveau régulier", desc = "Remonte les passages faibles, baisse les trop forts" },
+  { key = "de_on", lv = "lv_de", set = "de", name = "Sifflantes", desc = "Adoucit les « s », « ch » et « z » qui sifflent" },
+  { key = "lo_on", lv = "lv_lo", set = "lo", name = "Plosives et graves", desc = "« p » et « b » qui soufflent, voix trop près du micro" },
+  { key = "eq_on", lv = "lv_eq", set = "eq", name = "Équilibre de la voix", desc = "Voix trop sourde, trop nasale ou trop brillante" },
+}
+local function draw_simple()
+  col(COL.bg); gfx.rect(0, 0, gfx.w, gfx.h, 1)
+  text(TITLE, 24, 18, COL.text, 3)
+  local n = #takes
+  local analysed = 0
+  for _, e in ipairs(takes) do if cache[take_key(e.item, e.take)] then analysed = analysed + 1 end end
+  text(n == 0 and "Sélectionnez un ou plusieurs items de voix" or string.format("%d item%s sélectionné%s · %s", n, n > 1 and "s" or "", n > 1 and "s" or "", analysed == n and "analysé" .. (n > 1 and "s" or "") or "pas encore analysé"), 24, 46, COL.muted, 2)
+  local chg = false
+  local x, w = 24, W - 48
+  local y = 82
+  text("Type de voix", x, y + 5, COL.text, 1)
+  if button("Parole", x + w - 210, y, 100, 28, false, S.mode == "parole") then S.mode = "parole"; for k, v in pairs(PRESETS.parole) do S[k] = v end; chg = true end
+  if button("Chant", x + w - 104, y, 104, 28, false, S.mode == "chant") then S.mode = "chant"; for k, v in pairs(PRESETS.chant) do S[k] = v end; chg = true end
+  y = y + 46
+  for _, r in ipairs(ROWS) do
+    col(COL.line); gfx.line(x, y, x + w, y)
+    local on = S[r.key] == 1
+    -- case à cocher
+    local cx, cy = x, y + 18
+    col(on and COL.accent or COL.panel); gfx.rect(cx, cy, 20, 20, 1)
+    col(COL.line); if not on then gfx.rect(cx, cy, 20, 20, 0) end
+    if on then gfx.set(0.1, 0.06, 0.02); gfx.line(cx + 4, cy + 10, cx + 8, cy + 15); gfx.line(cx + 8, cy + 15, cx + 16, cy + 5) end
+    if clicked and hit(cx - 4, cy - 4, 260, 46) then S[r.key] = on and 0 or 1; chg = true; on = not on end
+    text(r.name, x + 32, y + 14, on and COL.text or COL.muted, 4)
+    text(r.desc, x + 32, y + 33, COL.muted, 2)
+    local bx = x + w - 3 * 68
+    for i, lab in ipairs({ "Léger", "Moyen", "Fort" }) do
+      if button(lab, bx + (i - 1) * 68, y + 16, 64, 26, false, on and S[r.lv] == i) and on then
+        S[r.lv] = i
+        for k, v in pairs(LEVELS[r.set][i]) do S[k] = v end
+        chg = true
+      end
+    end
+    y = y + 64
+  end
+  col(COL.line); gfx.line(x, y, x + w, y)
+  y = y + 14
+  if UI.progress then col(COL.line); gfx.rect(x, y, w, 6, 1); col(COL.accent); gfx.rect(x, y, math.floor(w * UI.progress), 6, 1) end
+  if UI.stats then text(UI.stats, x, y + 12, COL.ok, 2) end
+  text(UI.msg, x, y + 30, COL.muted, 2)
+  local by = H - 54
+  if button(analysed == n and n > 0 and "Réappliquer" or "Analyser et appliquer", x, by, 220, 36, true) then start_analysis() end
+  if button("Retirer", x + 230, by, 100, 36) then
+    takes = selected_takes()
+    local k = remove_all(takes)
+    UI.stats, UI.eq = nil, nil
+    set_msg(k > 0 and string.format("Traitement retiré de %d item%s.", k, k > 1 and "s" or "") or "Rien à retirer sur la sélection.")
+  end
+  if button("Réglages avancés", x + w - 160, by, 160, 36) then resize_to(1); return true end
+  if chg and not job then
+    local any = false
+    for _, e in ipairs(takes) do if cache[take_key(e.item, e.take)] then any = true end end
+    if any then apply_all() else save() end
+  end
+  gfx.update()
+  return true
+end
+
 local function draw()
+  if S.adv ~= 1 then return draw_simple() end
   col(COL.bg); gfx.rect(0, 0, gfx.w, gfx.h, 1)
   text(TITLE, 22, 16, COL.text, 3)
   local n = #takes
   local analysed = 0
   for _, e in ipairs(takes) do if cache[take_key(e.item, e.take)] then analysed = analysed + 1 end end
   text(n == 0 and "Aucun item sélectionné" or string.format("%d item%s · %s", n, n > 1 and "s" or "", analysed == n and "analysé" .. (n > 1 and "s" or "") or "à analyser"), 22, 42, COL.muted, 2)
+  if button(S.rider_on == 1 and "Rider activé" or "Rider désactivé", W - 330, 16, 126, 26, false, S.rider_on == 1) then S.rider_on = 1 - S.rider_on; UI.chg = true end
+  if button("Parole", W - 196, 16, 84, 26, false, S.mode == "parole") then S.mode = "parole"; for k, v in pairs(PRESETS.parole) do S[k] = v end; UI.chg = true end
+  if button("Chant", W - 106, 16, 84, 26, false, S.mode == "chant") then S.mode = "chant"; for k, v in pairs(PRESETS.chant) do S[k] = v end; UI.chg = true end
 
-  local x, w = 22, W - 44
-  local y = 74
-  -- Rider
+  local chg, reanalyse = UI.chg or false, false
+  UI.chg = false
+  local gap = 36
+  local cw = (W - 44 - gap) / 2
+  -------- colonne gauche
+  local x, w, y = 22, cw, 70
   col(COL.line); gfx.line(x, y, x + w, y)
   text("RIDER — niveau régulier", x, y + 10, COL.muted, 4)
-  local chg = false
-  if button("Parole", x + w - 170, y + 6, 80, 24, false, S.mode == "parole") then S.mode = "parole"; for k, v in pairs(PRESETS.parole) do S[k] = v end; chg = true end
-  if button("Chant", x + w - 84, y + 6, 84, 24, false, S.mode == "chant") then S.mode = "chant"; for k, v in pairs(PRESETS.chant) do S[k] = v end; chg = true end
-  y = y + 44
+  y = y + 38
   if button(S.auto == 1 and "Cible : automatique" or "Cible : fixe", x, y, 150, 24, false, false) then S.auto = 1 - S.auto; chg = true end
-  chg = slider("target", "Niveau cible", "target", -40, -8, 0.5, function(v) return string.format("%.1f dB", v) end, x + 170, y - 2, w - 170, S.auto == 1) or chg
+  chg = slider("target", "Niveau cible", "target", -40, -8, 0.5, function(v) return string.format("%.1f dB", v) end, x + 166, y - 2, w - 166, S.auto == 1) or chg
   y = y + 46
   chg = slider("amount", "Quantité", "amount", 0, 100, 1, function(v) return string.format("%d %%", v) end, x, y, w) or chg
-  y = y + 46
+  y = y + 44
   chg = slider("range", "Correction maximale", "range", 1, 15, 0.5, function(v) return string.format("± %.1f dB", v) end, x, y, w) or chg
-  y = y + 46
+  y = y + 44
   chg = slider("smooth", "Douceur (rapide ↔ lent)", "smooth", 40, 400, 10, function(v) return string.format("%d ms", v) end, x, y, w) or chg
-  y = y + 54
-  -- De-esser
+  y = y + 52
   col(COL.line); gfx.line(x, y, x + w, y)
   text("DE-ESSER — sifflantes", x, y + 10, COL.muted, 4)
   if button(S.de_on == 1 and "Activé" or "Désactivé", x + w - 100, y + 6, 100, 24, false, S.de_on == 1) then S.de_on = 1 - S.de_on; chg = true end
-  y = y + 44
+  y = y + 40
   local off = S.de_on ~= 1
   chg = slider("depth", "Atténuation maximale", "depth", 0, 15, 0.5, function(v) return string.format("%.1f dB", v) end, x, y, w, off) or chg
-  y = y + 46
-  chg = slider("sens", "Sensibilité", "sens", 0, 100, 1, function(v) return string.format("%d", v) end, x, y, w, off) or chg
-  y = y + 46
-  local fchg = slider("freq", "Fréquence", "freq", 3000, 10000, 100, function(v) return string.format("%.1f kHz", v / 1000) end, x, y, w, off)
   y = y + 44
+  chg = slider("sens", "Sensibilité", "sens", 0, 100, 1, function(v) return string.format("%d", v) end, x, y, w, off) or chg
+  y = y + 44
+  reanalyse = slider("freq", "Fréquence", "freq", 3000, 10000, 100, function(v) return string.format("%.1f kHz", v / 1000) end, x, y, w, off) or reanalyse
+  y = y + 42
   if button("Aigus seulement", x, y, 150, 24, false, S.split == 1) then S.split = 1; chg = true end
   if button("Tout le signal", x + 156, y, 130, 24, false, S.split == 0) then S.split = 0; chg = true end
-  y = y + 40
 
-  -- état
-  if UI.progress then
-    col(COL.line); gfx.rect(x, y, w, 6, 1); col(COL.accent); gfx.rect(x, y, math.floor(w * UI.progress), 6, 1)
-  end
-  if UI.stats then text(UI.stats, x, y + 10, COL.ok, 2) end
-  text(UI.msg, x, y + 28, COL.muted, 2)
+  -------- colonne droite
+  x, y = 22 + cw + gap, 70
+  col(COL.line); gfx.line(x, y, x + w, y)
+  text("GRAVES — plosives et effet de proximité", x, y + 10, COL.muted, 4)
+  if button(S.lo_on == 1 and "Activé" or "Désactivé", x + w - 100, y + 6, 100, 24, false, S.lo_on == 1) then S.lo_on = 1 - S.lo_on; chg = true end
+  y = y + 40
+  off = S.lo_on ~= 1
+  chg = slider("lo_depth", "Atténuation maximale", "lo_depth", 0, 18, 0.5, function(v) return string.format("%.1f dB", v) end, x, y, w, off) or chg
+  y = y + 44
+  chg = slider("plo_sens", "Plosives : sensibilité", "plo_sens", 0, 100, 1, function(v) return string.format("%d", v) end, x, y, w, off) or chg
+  y = y + 44
+  chg = slider("prox", "Effet de proximité : quantité", "prox", 0, 100, 1, function(v) return string.format("%d %%", v) end, x, y, w, off) or chg
+  y = y + 44
+  reanalyse = slider("lowfreq", "Fréquence", "lowfreq", 60, 400, 5, function(v) return string.format("%d Hz", v) end, x, y, w, off) or reanalyse
+  y = y + 52
+  col(COL.line); gfx.line(x, y, x + w, y)
+  text("ÉGALISATION — correction tonale", x, y + 10, COL.muted, 4)
+  if button(S.eq_on == 1 and "Activée" or "Désactivée", x + w - 100, y + 6, 100, 24, false, S.eq_on == 1) then S.eq_on = 1 - S.eq_on; chg = true end
+  y = y + 40
+  off = S.eq_on ~= 1
+  local hw = (w - 20) / 2
+  chg = slider("eq_amount", "Quantité", "eq_amount", 0, 100, 1, function(v) return string.format("%d %%", v) end, x, y, hw, off) or chg
+  chg = slider("eq_max", "Correction max.", "eq_max", 1, 12, 0.5, function(v) return string.format("± %.1f dB", v) end, x + hw + 20, y, hw, off) or chg
+  y = y + 44
+  chg = slider("eq_color", "Couleur (sombre ↔ brillant)", "eq_color", -4, 4, 0.5, function(v) return string.format("%+.1f dB", v) end, x, y, w, off) or chg
+  y = y + 40
+  eq_graph(x, y, w, 96)
+
+  -------- bas
   local by = H - 46
-  if button("Analyser la sélection", x, by, 190, 30, true) then start_analysis() end
-  if button("Retirer", x + 200, by, 100, 30) then
+  if UI.progress then
+    col(COL.line); gfx.rect(22, by - 52, W - 44, 6, 1); col(COL.accent); gfx.rect(22, by - 52, math.floor((W - 44) * UI.progress), 6, 1)
+  end
+  if UI.stats then text(UI.stats, 22, by - 40, COL.ok, 2) end
+  text(UI.msg, 22, by - 22, COL.muted, 2)
+  if button("Analyser la sélection", 22, by, 190, 30, true) then start_analysis() end
+  if button("Retirer", 222, by, 100, 30) then
     takes = selected_takes()
     local k = remove_all(takes)
-    UI.stats = nil
+    UI.stats, UI.eq = nil, nil
     set_msg(k > 0 and string.format("Plugin et courbes retirés de %d item%s.", k, k > 1 and "s" or "") or "Rien à retirer sur la sélection.")
   end
-  if button("Fermer", x + w - 100, by, 100, 30) then return false end
+  if button("◂ Vue simple", W - 140, by, 118, 30) then resize_to(0); return true end
 
-  if fchg then cache = {}; start_analysis()               -- nouvelle fréquence : il faut réécouter les aigus
+  if reanalyse then cache = {}; start_analysis()        -- nouvelle fréquence : il faut réécouter l'audio
   elseif chg and not job then
     local any = false
     for _, e in ipairs(takes) do if cache[take_key(e.item, e.take)] then any = true end end
@@ -512,6 +968,7 @@ local function loop()
   if ch < 0 or ch == 27 then save(); return end
   local down = gfx.mouse_cap & 1 == 1
   clicked = down and not UI.mouse_was
+  if UI.skip_click then clicked = false; if not down then UI.skip_click = false end end
   UI.mouse_was = down
   if job then job() end
   if not draw() then save(); gfx.quit(); return end
