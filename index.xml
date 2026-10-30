@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Vocal level &amp; de-esser" commit="7190802ea9f36621d4a2d8d086b28c01b5585c85">
+<index version="1" name="Vocal level &amp; de-esser" commit="65914cb28317b1911dc92f76a10119c6d6e326e5">
   <category name="Vocal level">
     <reapack name="Vocal level &amp; de-esser" type="script" desc="Vocal level &amp; de-esser">
       <version name="0.1.0" author="Nicolas Debois" time="2026-10-29T23:21:16Z">
@@ -14,6 +14,14 @@
 • Le niveau régulier peut être désactivé</changelog>
         <source file="Vocal level &amp; de-esser.lua" hash="12206f86c976bc4350ebac6da5e015a7fc7b6e0a55034c0da2133f1313409cedc82e" main="main">https://raw.githubusercontent.com/nicolasdebois-pixel/vocal-level-de-esser/7190802ea9f36621d4a2d8d086b28c01b5585c85/Scripts/Vocal%20level%20%26%20de-esser.lua</source>
         <source file="Vocal level.jsfx" hash="1220f09d74f973e9d641bbbb1428cea533477d9c6a8df478c0607403fd314a76cdf5" type="effect">https://raw.githubusercontent.com/nicolasdebois-pixel/vocal-level-de-esser/7190802ea9f36621d4a2d8d086b28c01b5585c85/Effects/Vocal%20level.jsfx</source>
+      </version>
+      <version name="0.3.0" author="Nicolas Debois" time="2026-10-30T09:17:35Z">
+        <changelog>• Niveau régulier plus transparent, façon compresseur optique (LA-2A) : le gain suit la phrase plutôt que les syllabes, les pointes sont rattrapées vite, le retour se fait en deux temps, et les grands changements ont lieu pendant les pauses
+• Plosives : nouveau traitement du sub (sous 80 Hz), jusqu'à -30 dB, qui ne se laisse plus tromper par une prise très proche du micro ni par un grondement de fond
+• Coupe-bas automatique (60 Hz en Moyen) quand « Plosives et graves » est actif
+• Réglages avancés : plosives et effet de proximité réglables séparément</changelog>
+        <source file="Vocal level &amp; de-esser.lua" hash="12204aebff00226c32f8d9bb13a31e5d8468772e5f3ed1b38b1058a6168c117a93f1" main="main">https://raw.githubusercontent.com/nicolasdebois-pixel/vocal-level-de-esser/65914cb28317b1911dc92f76a10119c6d6e326e5/Scripts/Vocal%20level%20%26%20de-esser.lua</source>
+        <source file="Vocal level.jsfx" hash="1220917671719b9fd32ae54383bc143ddb32dba4aa562df0687b977578941de47885" type="effect">https://raw.githubusercontent.com/nicolasdebois-pixel/vocal-level-de-esser/65914cb28317b1911dc92f76a10119c6d6e326e5/Effects/Vocal%20level.jsfx</source>
       </version>
       <metadata>
         <description>{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}}\f0\fs22 Rend une voix parl\u233?e ou chant\u233?e plus propre en un clic : niveau r\u233?gulier, sifflantes, plosives et graves (voix trop pr\u232?s du micro), \u233?quilibre tonal adapt\u233? \u224? chaque voix. Analyse de tout l'item \u224? l'avance, courbes \u233?crites sur la prise.\par}</description>
