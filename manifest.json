@@ -2,7 +2,7 @@
   "name": "Vocal level & de-esser",
   "category": "Vocal level",
   "package": "Vocal level & de-esser",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": "Nicolas Debois",
   "description": "Rend une voix parlée ou chantée plus propre en un clic : niveau régulier, sifflantes, plosives et graves (voix trop près du micro), équilibre tonal adapté à chaque voix. Analyse de tout l'item à l'avance, courbes écrites sur la prise.",
   "files": [
@@ -16,8 +16,7 @@
     }
   ],
   "changelog": [
-    "Retouche locale : faites une sélection temporelle sur un son (le « B » de « Bonjour »…) et renforcez uniquement là l'atténuation de la plosive, de la sifflante, ou corrigez le niveau, sans toucher au reste du traitement",
-    "Les retouches sont mémorisées sur la prise, réappliquées quand on change un réglage général, et suivent le son si l'item est déplacé ou rogné",
-    "« Retirer » efface aussi les retouches"
+    "La barre d'espace lance et arrête la lecture même quand la fenêtre du script est active (plus besoin de recliquer dans l'arrangement)",
+    "Ctrl/Cmd+Z et Ctrl/Cmd+Maj+Z (ou Ctrl+Y) annulent / rétablissent depuis la fenêtre du script"
   ]
 }

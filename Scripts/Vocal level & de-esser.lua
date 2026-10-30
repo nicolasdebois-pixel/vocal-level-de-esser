@@ -1262,6 +1262,13 @@ end
 local function loop()
   local ch = gfx.getchar()
   if ch < 0 or ch == 27 then save(); return end
+  -- la fenêtre du script garde le clavier : on relaie les raccourcis utiles à REAPER
+  local cap = gfx.mouse_cap
+  if ch == 32 then reaper.Main_OnCommand(40044, 0)                                  -- espace : lecture / stop
+  elseif ch == 26 or (ch == 122 and cap & 4 == 4) then                             -- Ctrl/Cmd+Z : annuler (Maj : rétablir)
+    reaper.Main_OnCommand(cap & 8 == 8 and 40030 or 40029, 0)
+  elseif ch == 25 or (ch == 121 and cap & 4 == 4) then reaper.Main_OnCommand(40030, 0)  -- Ctrl+Y : rétablir
+  end
   local down = gfx.mouse_cap & 1 == 1
   clicked = down and not UI.mouse_was
   if UI.skip_click then clicked = false; if not down then UI.skip_click = false end end
